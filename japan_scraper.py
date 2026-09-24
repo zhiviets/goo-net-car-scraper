@@ -272,6 +272,11 @@ def parse_detail(html: str) -> dict:
     power = re.search(r"最高出力\n(\d{2,4})\s*ps", text, re.I)
     if power:
         d["hp"] = int(power.group(1))
+    else:
+        # У электромобилей мощность часто только в кВт («(150kW)» или «150kW»)
+        kw = re.search(r"最高出力\n\(?(\d{2,4}(?:\.\d+)?)\s*kW", text, re.I)
+        if kw:
+            d["hp"] = round(float(kw.group(1)) * 1.35962)
     price = re.search(r"車両本体価格\n\(税込\)\n([\d.,]+)\n万円", text)
     if price:
         d["price_jpy"] = round(float(price.group(1).replace(",", "")) * 10000)
@@ -668,11 +673,13 @@ def run_size(known: dict) -> int:
 
 
 def complete(listing: dict) -> bool:
-    """Полная информация: фото, цена, год и то, по чему считается таможня (объём и мощность)."""
+    """Полная информация: фото, цена, год и то, по чему считается таможня (объём и мощность;
+    у электромобилей — мощность)."""
     spec = listing.get("spec") or {}
     ev = spec.get("Топливо") == "электро"
+    # Мощность нужна и электромобилям: по ней считается утильсбор
     return bool(listing.get("photo_url") and listing.get("price_value") and listing.get("year")
-                and (spec.get("Мощность, л.с.") or ev) and (spec.get("Объём, см³") or ev))
+                and spec.get("Мощность, л.с.") and (spec.get("Объём, см³") or ev))
 
 
 def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
