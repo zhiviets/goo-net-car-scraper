@@ -1,0 +1,20 @@
+name: Site stats
+
+# Разовая проверка: сколько машин на сайте по странам. Ничего не меняет.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "httpx>=0.27,<1.0"
+      - env:
+          BN_AUTO_URL: ${{ secrets.BN_AUTO_URL }}
+          BN_AUTO_IMPORT_TOKEN: ${{ secrets.BN_AUTO_IMPORT_TOKEN }}
+        run: python site_stats.py
