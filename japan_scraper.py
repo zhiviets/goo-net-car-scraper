@@ -40,7 +40,7 @@ TOTAL = int(os.environ.get("GOONET_TOTAL") or "0")
 # добавляет до FILL_PER_RUN новых порциями по BATCH с паузой BATCH_PAUSE. Потом — обновление
 # два раза в неделю (UPDATE_DAYS, 0 — понедельник, первый прогон дня): до UPDATE_NEW новых
 # порциями по UPDATE_BATCH с паузой UPDATE_PAUSE минут; в остальное время прогон сразу заканчивается.
-FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "6000")
+FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "5500")
 FILL_PER_RUN = int(os.environ.get("GOONET_FILL_PER_RUN") or "1000")
 UPDATE_DAYS = {int(d) for d in (os.environ.get("GOONET_UPDATE_DAYS") or "2,5").split(",") if d.strip()}
 UPDATE_NEW = int(os.environ.get("GOONET_UPDATE_NEW") or "600")
