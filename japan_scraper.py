@@ -297,7 +297,103 @@ def parse_detail(html: str) -> dict:
         d["grade"] = g or None
     photos = re.findall(r'https?://picture1\.goo-net\.com/[^"\'\s]+/J/[^"\'\s]+\.jpg', html)
     d["photos"] = list(dict.fromkeys(photos))[:3]
+    d["options"] = parse_equipment(all_lines)
     return d
+
+
+# ---------- оборудование (раздел «装備» страницы объявления) ----------
+# Пункт goo-net → пункт блока «Комплектация» на сайте. Сайт хранит список пунктов под корейскими
+# названиями encar (так он собирает одинаковый блок для всех стран), поэтому отдаём их.
+EQUIP = {
+    "アダプティブクルーズコントロール": "크루즈 컨트롤(일반, 어댑티브)",
+    "レーンアシスト": "차선이탈 경보 시스템(LDWS)",
+    "自動駐車システム": "주차 보조 시스템",
+    "パークアシスト": "주차 보조 시스템",
+    "横滑り防止装置": "차체자세 제어장치(ESC)",
+    "衝突被害軽減システム": "긴급 제동 보조(AEB)",
+    "クリアランスソナー": "주차감지센서(전방, 후방)",
+    "オートマチックハイビーム": "오토 하이빔",
+    "オートライト": "오토 라이트",
+    "サンルーフ": "선루프",
+    "ABS": "브레이크 잠김 방지(ABS)",
+    "パワーステアリング": "파워 스티어링 휠",
+    "パワーウィンドウ": "파워 윈도우",
+    "盗難防止システム": "도난 방지 시스템",
+    "ドライブレコーダー": "블랙박스",
+    "USB入力端子": "USB 단자",
+    "Bluetooth接続": "블루투스",
+    "電動格納ミラー": "전동접이 사이드 미러",
+    "カーナビ": "내비게이션",
+    "ポータブルナビ": "내비게이션",
+    "アルミホイール": "알루미늄 휠",
+    "革シート": "가죽시트",
+    "ハーフレザーシート": "하프 가죽시트",
+    "キーレス": "무선도어 잠금장치",
+    "LEDヘッドランプ": "헤드램프(HID, LED)",
+    "HID(キセノンライト)": "헤드램프(HID, LED)",
+    "バックカメラ": "후방 카메라",
+    "ETC": "하이패스",
+    "ETC2.0": "하이패스",
+    "スマートキー": "스마트키",
+    "パワーシート": "전동시트(운전석, 동승석)",
+    "シートヒーター": "열선시트(앞좌석, 뒷좌석)",
+}
+
+
+def parse_equipment(lines: list[str]) -> dict | None:
+    """{"names": [есть], "known": [о чём goo-net сообщает]} из раздела «装備»: строки
+    «運転支援・安全装備», «基本装備», «外装・内装» — пункты; перед отсутствующим пунктом стоит
+    строка «-», после некоторых — строка-пояснение (её пропускаем). Раздел кончается третьей
+    ссылкой «装備略号/用語解説»."""
+    start = next((i for i, ln in enumerate(lines[:-1]) if ln == "装備" and lines[i + 1] == "運転支援・安全装備"), None)
+    if start is None:
+        return None
+    have, known = set(), set()
+    missing, ends = False, 0
+    for ln in lines[start + 2: start + 300]:
+        if ln == "装備略号/用語解説":
+            ends += 1
+            if ends == 3:
+                break
+            continue
+        if ln == "-":
+            missing = True
+            continue
+        name, _, value = ln.partition(":")
+        on = not missing
+        missing = False
+        if name == "エアバッグ":
+            known |= {"에어백(운전석, 동승석)", "에어백(사이드)"}
+            if on and re.search(r"運転席|助手席", value):
+                have.add("에어백(운전석, 동승석)")
+            if on and "サイド" in value:
+                have.add("에어백(사이드)")
+            if on and "カーテン" in value:
+                have.add("에어백(커튼)")
+                known.add("에어백(커튼)")
+        elif name == "スライドドア":
+            # Только у машин со сдвижными дверями — остальным пункт ни к чему
+            if on:
+                known.add("전동 슬라이딩 도어")
+                if "電動" in value:
+                    have.add("전동 슬라이딩 도어")
+        elif name == "オーディオ":
+            known.add("CD 플레이어")
+            if on and "CD" in value:
+                have.add("CD 플레이어")
+        elif name == "3列シート":
+            if on:
+                have.add("3열 시트")
+                known.add("3열 시트")
+        elif name in EQUIP:
+            known.add(EQUIP[name])
+            if on:
+                have.add(EQUIP[name])
+    if not known:
+        return None
+    if "가죽시트" in have:
+        known.discard("하프 가죽시트")   # кожаный салон — «комбинированная кожа» ни к чему
+    return {"names": sorted(have), "known": sorted(known)}
 
 
 def power_class(d: dict) -> str | None:
@@ -454,6 +550,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
         "price_value": d.get("price_jpy"), "photo_url": photo,
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
+        **({"options": d["options"]} if d.get("options") else {}),
     }
 
 
@@ -569,9 +666,11 @@ def complete(listing: dict) -> bool:
 def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     """Машины с сайта, не встреченные в обходе: давно не обновлявшиеся и неполные открываем
     заново. Жива — отметка «ещё в продаже» (а неполную — дополняем); снята — не трогаем,
-    через 30 дней сайт её скроет."""
-    todo = [(k, i) for k, i in known.items() if k not in seen and i.get("url")
-            and (not i.get("complete") or (i.get("seen_days") or 0) >= 7)]
+    через 30 дней сайт её скроет. Ещё открываем машины без блока «Комплектация» (добавлены
+    до того, как парсер стал читать оборудование) — им отправляем оборудование."""
+    todo = [(k, i) for k, i in known.items() if i.get("url") and (
+        (k not in seen and (not i.get("complete") or (i.get("seen_days") or 0) >= 7))
+        or (i.get("complete") and i.get("published") and i.get("has_options") is False))]
     todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
     out, alive = [], 0
     for key, info in todo[:VERIFY_LIMIT]:
@@ -584,7 +683,7 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
                "year": d.get("year") or info.get("year"), "detail": d}
         if info.get("complete"):
             out.append({"external_id": key, "source_url": info["url"], "price_value": d["price_jpy"],
-                        "mileage_km": d.get("mileage_km")})
+                        "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {})})
         elif car["make"] and car["model"]:
             listing = to_listing(car, f)
             if complete(listing):
