@@ -55,6 +55,10 @@ VERIFY_LIMIT = int(os.environ.get("GOONET_VERIFY") or "300")
 SHARE_160 = float(os.environ.get("GOONET_SHARE_160") or "0.75")
 MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2017")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
+# Через столько минут после старта новые порции не начинаем: GitHub обрывает прогон через
+# 6 ч (timeout 355 мин), а оборванный прогон не запускает следующий. Порция — до ~30 мин.
+RUN_MINUTES = float(os.environ.get("GOONET_RUN_MINUTES") or "300")
+STARTED = time.time()
 WORKERS = int(os.environ.get("GOONET_WORKERS") or "2")
 BATCH = int(os.environ.get("GOONET_BATCH") or "100")
 # При заполнении — короткая пауза между порциями (1–2 мин), при обновлении — UPDATE_PAUSE
@@ -674,6 +678,8 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
     out, alive = [], 0
     for key, info in todo[:VERIFY_LIMIT]:
+        if time.time() - STARTED > (RUN_MINUTES - 60) * 60:
+            break         # время нужно новым машинам — остальные проверим в следующий прогон
         html = f.get(info["url"])
         d = parse_detail(html) if html else {}
         if not d.get("price_jpy"):
@@ -731,6 +737,9 @@ def main():
     chunks = [cars[i:i + BATCH] for i in range(0, len(cars), BATCH)]
     sent = rejected = 0
     for n, chunk in enumerate(chunks, 1):
+        if time.time() - STARTED > RUN_MINUTES * 60:
+            log(f"Прошло {RUN_MINUTES:g} мин — остальные {len(cars) - (n - 1) * BATCH} машин в следующий прогон")
+            break
         log(f"=== Порция {n}/{len(chunks)} ===")
         listings = []
         for car in chunk:
