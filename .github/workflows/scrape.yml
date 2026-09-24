@@ -21,6 +21,12 @@ on:
         description: "Для проверки: сколько моделей обойти (0 — все)"
         default: "0"
 
+# Один прогон за раз: запуск по расписанию ждёт, пока закончится предыдущий
+# (два параллельных прогона — двойная нагрузка на сайт-источник и риск блокировки)
+concurrency:
+  group: goonet-scrape
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
