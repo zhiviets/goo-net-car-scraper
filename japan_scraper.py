@@ -11,7 +11,7 @@
      goonet) — и пауза BATCH_PAUSE минут.
 
 Переменные окружения: BN_AUTO_URL, BN_AUTO_IMPORT_TOKEN (секреты репозитория),
-GOONET_TOTAL (1000), GOONET_SCAN_MINUTES (90), GOONET_BATCH (100), GOONET_BATCH_PAUSE (10).
+GOONET_TOTAL (0 — само), GOONET_SCAN_MINUTES (90), GOONET_BATCH (100), GOONET_BATCH_PAUSE (1.5).
 Без BN_AUTO_* скрипт собирает и печатает, но ничего не отправляет.
 """
 
@@ -36,20 +36,27 @@ BN_AUTO_URL = os.environ.get("BN_AUTO_URL", "").rstrip("/")
 BN_AUTO_IMPORT_TOKEN = os.environ.get("BN_AUTO_IMPORT_TOKEN", "")
 # Сколько новых машин за прогон (0 — само: до FILL_TARGET на сайте, потом раз в неделю)
 TOTAL = int(os.environ.get("GOONET_TOTAL") or "0")
-# Заполнение каталога: пока машин на сайте меньше FILL_TARGET — каждый прогон добавляет
-# до FILL_PER_RUN новых; дальше раз в неделю (WEEKLY_DAY, 0 — понедельник) — WEEKLY_NEW
-FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "5500")
+# Заполнение каталога: пока машин на сайте меньше FILL_TARGET — каждый прогон (раз в 8 часов)
+# добавляет до FILL_PER_RUN новых порциями по BATCH с паузой BATCH_PAUSE. Потом — обновление
+# два раза в неделю (UPDATE_DAYS, 0 — понедельник, первый прогон дня): до UPDATE_NEW новых
+# порциями по UPDATE_BATCH с паузой UPDATE_PAUSE минут; в остальное время прогон сразу заканчивается.
+FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "6000")
 FILL_PER_RUN = int(os.environ.get("GOONET_FILL_PER_RUN") or "1000")
-WEEKLY_NEW = int(os.environ.get("GOONET_WEEKLY_NEW") or "1000")
-WEEKLY_DAY = int(os.environ.get("GOONET_WEEKLY_DAY") or "5")
+UPDATE_DAYS = {int(d) for d in (os.environ.get("GOONET_UPDATE_DAYS") or "2,5").split(",") if d.strip()}
+UPDATE_NEW = int(os.environ.get("GOONET_UPDATE_NEW") or "600")
+UPDATE_BATCH = int(os.environ.get("GOONET_UPDATE_BATCH") or "150")
+UPDATE_PAUSE = float(os.environ.get("GOONET_UPDATE_PAUSE") or "30")
+# Разнообразие: не больше стольких машин одной модели за прогон
+PER_MODEL_RUN = int(os.environ.get("GOONET_PER_MODEL_RUN") or "4")
 # Сколько машин с сайта, не встреченных при обходе, проверить заново (жива ли, дополнить)
 VERIFY_LIMIT = int(os.environ.get("GOONET_VERIFY") or "300")
 SHARE_160 = float(os.environ.get("GOONET_SHARE_160") or "0.75")
 MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2017")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
-WORKERS = int(os.environ.get("GOONET_WORKERS") or "3")
+WORKERS = int(os.environ.get("GOONET_WORKERS") or "2")
 BATCH = int(os.environ.get("GOONET_BATCH") or "100")
-BATCH_PAUSE = float(os.environ.get("GOONET_BATCH_PAUSE") or "10")
+# При заполнении — короткая пауза между порциями (1–2 мин), при обновлении — UPDATE_PAUSE
+BATCH_PAUSE = float(os.environ.get("GOONET_BATCH_PAUSE") or "1.5")
 # Для проверки: не больше стольких моделей (0 — все)
 MAX_MODELS = int(os.environ.get("GOONET_MAX_MODELS") or "0")
 # Сколько объявлений модели открывать, чтобы найти машину до 160 л.с.
@@ -100,10 +107,26 @@ class Fetcher:
         self.client = httpx.Client(headers={"User-Agent": UA, "Accept-Language": "ja,en;q=0.8"}, timeout=40,
                                    follow_redirects=True)
         self.count = 0
+        # После обхода списков — темп человека, листающего объявления: 2–5 с между страницами
+        # и перерыв 1–2,5 мин каждые 25–40 страниц
+        self.human = False
+        self.next_break = random.randint(25, 40)
+
+    def pace(self):
+        if not self.human:
+            time.sleep(random.uniform(0.8, 2.0))
+            return
+        if self.count >= self.next_break:
+            pause = random.uniform(60, 150)
+            log(f"  перерыв {pause / 60:.1f} мин (как человек)")
+            time.sleep(pause)
+            self.next_break = self.count + random.randint(25, 40)
+        else:
+            time.sleep(random.uniform(2.0, 5.0))
 
     def get(self, url: str) -> str | None:
         for attempt in range(3):
-            time.sleep(random.uniform(0.8, 2.0))
+            self.pace()
             try:
                 resp = self.client.get(url if url.startswith("http") else BASE + url)
             except httpx.HTTPError:
@@ -111,7 +134,8 @@ class Fetcher:
                 continue
             self.count += 1
             if resp.status_code == 429 or resp.status_code >= 500:
-                time.sleep(10 * (attempt + 1))
+                # Сайт просит сбавить темп — долгая пауза, а не повтор сразу
+                time.sleep(60 * (attempt + 1))
                 continue
             return decode(resp)
         return None
@@ -308,7 +332,10 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
             car["power"] = resolve(car)
         return car.get("power")
 
-    def take(car):
+    taken = {}
+
+    def take(car, key):
+        taken[key] = taken.get(key, 0) + 1
         picked.append(car)
         used.add(car["id"])
         k = (car["power"], year_band(car["year"]))
@@ -329,7 +356,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
         if not best and total_of("gt160") < quota["gt160"]:
             best = next((c for c in cars if c.get("power") == "gt160"), None)
         if best:
-            take(best)
+            take(best, key)
     covered = len(picked)
 
     def fill(kind, band, need):
@@ -340,6 +367,8 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
             for key, cars in groups.items():
                 if not need():
                     break
+                if taken.get(key, 0) >= PER_MODEL_RUN:
+                    continue
                 i = pos[key]
                 while i < len(cars):
                     c = cars[i]
@@ -347,7 +376,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
                     if c["id"] in used or (band and year_band(c["year"]) != band):
                         continue
                     if power(c, key) == kind:
-                        take(c)
+                        take(c, key)
                         progress = True
                         break
                 pos[key] = i
@@ -500,19 +529,25 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
 
 
 def run_size(known: dict) -> int:
-    """Сколько новых машин добавить: вручную (GOONET_TOTAL), до заполнения каталога
-    (FILL_TARGET) — по FILL_PER_RUN за прогон, потом раз в неделю WEEKLY_NEW; 0 — сегодня не нужно."""
+    """Сколько новых машин добавить: вручную (GOONET_TOTAL); до заполнения каталога (FILL_TARGET) —
+    по FILL_PER_RUN за прогон; потом в дни обновления (первый прогон дня) — UPDATE_NEW порциями
+    по UPDATE_BATCH с паузой UPDATE_PAUSE; 0 — сегодня ничего не нужно."""
+    global BATCH, BATCH_PAUSE
     if TOTAL:
         return TOTAL
     good = sum(1 for i in known.values() if i.get("complete") and i.get("published"))
     if good < FILL_TARGET:
         n = min(FILL_PER_RUN, FILL_TARGET - good)
         log(f"Заполнение каталога: на сайте {good} из {FILL_TARGET} — добавим {n}")
+        # Каталог ещё не заполнен — workflow сразу запустит следующий прогон (без остановки)
+        open("continue_fill", "w").close()
         return n
-    if time.gmtime().tm_wday == WEEKLY_DAY:
-        log(f"Каталог заполнен ({good}) — еженедельное обновление: до {WEEKLY_NEW} новых")
-        return WEEKLY_NEW
-    log(f"Каталог заполнен ({good}), сегодня не день обновления — только отметки и проверка")
+    now = time.gmtime()
+    if now.tm_wday in UPDATE_DAYS and now.tm_hour < 8:
+        BATCH, BATCH_PAUSE = UPDATE_BATCH, UPDATE_PAUSE
+        log(f"Каталог заполнен ({good}) — обновление: до {UPDATE_NEW} новых, порции по {BATCH} с паузой {BATCH_PAUSE:g} мин")
+        return UPDATE_NEW
+    log(f"Каталог заполнен ({good}), сейчас не время обновления — прогон окончен")
     return 0
 
 
@@ -556,7 +591,10 @@ def main():
     f = Fetcher()
     known = fetch_known()
     total = run_size(known)
+    if not total:
+        return
     groups, touched = scan(f, known)
+    f.human = True
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km")} for c in touched])
@@ -600,8 +638,9 @@ def main():
         push(listings)
         sent += len(listings)
         if n < len(chunks):
-            log(f"Пауза {BATCH_PAUSE:g} мин")
-            time.sleep(BATCH_PAUSE * 60)
+            pause = BATCH_PAUSE * random.uniform(0.7, 1.3)
+            log(f"Пауза {pause:.1f} мин")
+            time.sleep(pause * 60)
     log(f"Готово: отправлено {sent}, отсеяно без фото/цены/мощности {rejected}, запросов к goo-net {f.count}")
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1)
