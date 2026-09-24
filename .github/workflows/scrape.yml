@@ -15,6 +15,9 @@ on:
       minutes:
         description: "Сколько минут обходить марки и модели (для проверки хватит 5)"
         default: "90"
+      models:
+        description: "Для проверки: сколько моделей обойти (0 — все)"
+        default: "0"
 
 jobs:
   scrape:
@@ -36,6 +39,7 @@ jobs:
           BN_AUTO_IMPORT_TOKEN: ${{ secrets.BN_AUTO_IMPORT_TOKEN }}
           GOONET_TOTAL: ${{ inputs.total || '1000' }}
           GOONET_SCAN_MINUTES: ${{ inputs.minutes || '90' }}
+          GOONET_MAX_MODELS: ${{ inputs.models || '0' }}
         run: python japan_scraper.py
       - name: Upload batch
         if: always()

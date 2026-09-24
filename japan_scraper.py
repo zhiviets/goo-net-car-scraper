@@ -41,6 +41,8 @@ SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
 WORKERS = int(os.environ.get("GOONET_WORKERS") or "3")
 BATCH = int(os.environ.get("GOONET_BATCH") or "100")
 BATCH_PAUSE = float(os.environ.get("GOONET_BATCH_PAUSE") or "10")
+# Для проверки: не больше стольких моделей (0 — все)
+MAX_MODELS = int(os.environ.get("GOONET_MAX_MODELS") or "0")
 # Сколько объявлений модели открывать, чтобы найти машину до 160 л.с.
 RESOLVE_PER_MODEL = 4
 MAX_PHOTO_BYTES = 850 * 1024
@@ -421,6 +423,13 @@ def scan(f: Fetcher, known: dict) -> dict:
         ms = models_of(f, b)
         log(f"  {MAKES[b]}: моделей {len(ms)}")
         jobs += [(b, m) for m in ms]
+    if MAX_MODELS:
+        # Проверка: несколько моделей разных марок, а не все модели первой марки
+        by_brand = {}
+        for b, m in jobs:
+            by_brand.setdefault(b, []).append((b, m))
+        jobs = [x for group in zip(*[v[:MAX_MODELS] for v in by_brand.values()]) for x in group][:MAX_MODELS]
+        log(f"Проверка: только {len(jobs)} моделей")
     groups, shown = {}, False
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(f.get, f"{BASE}/usedcar/brand-{b}/car-{m}/"): (b, m) for b, m in jobs}
