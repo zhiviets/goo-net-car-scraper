@@ -15,3 +15,8 @@ for source in ("goonet", "encar", "che168"):
     print(f"{source}: всего {len(items)}, опубликовано {len(pub)}, полных опубликованных "
           f"{sum(1 for i in pub if i.get('complete'))}, с комплектацией {sum(1 for i in items if i.get('has_options'))}, "
           f"обновлены сегодня {sum(1 for i in items if (i.get('seen_days') or 0) == 0)}")
+
+    bad = [i for i in pub if not i.get("complete")]
+    for i in bad[:12]:
+        print(f"   неполная: {i.get('id')} {i.get('make')} {i.get('model')} {i.get('year')} cc={i.get('cc')} hp={i.get('hp')} "
+              f"фото {i.get('photo_kb')} КБ, точная мощность {i.get('exact_power')}, «{(i.get('text') or '')[:60]}»")
