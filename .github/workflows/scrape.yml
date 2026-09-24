@@ -5,13 +5,15 @@ name: Japan (goo-net) scrape
 # без них сборщик только собирает и печатает, ничего не отправляя.
 on:
   schedule:
-    # Среда и суббота, 03:00 UTC (13:00 по Владивостоку) — не в дни Кореи (пн, чт) и Китая (вт, пт)
-    - cron: "0 3 * * 3,6"
+    # Каждый день в 05:00 UTC (15:00 по Владивостоку). Пока каталог не заполнен (5500 машин) —
+    # до 1000 новых за прогон; потом новые — раз в неделю (суббота), в остальные дни только
+    # отметки «ещё в продаже» и дополнение неполных объявлений
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       total:
-        description: "Сколько машин собрать (все модели с 2017 г., 75 % до 160 л.с.)"
-        default: "1000"
+        description: "Сколько новых машин добавить (0 — само: заполнение до 5500, потом раз в неделю)"
+        default: "0"
       minutes:
         description: "Сколько минут обходить марки и модели (для проверки хватит 5)"
         default: "90"
@@ -22,7 +24,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # Обход (до 1,5 ч) + 1000 машин порциями по 100 с паузой 10 минут
+    # Обход (до 1,5 ч) + до 1000 машин порциями по 100 с паузой 10 минут
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +39,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           BN_AUTO_URL: ${{ secrets.BN_AUTO_URL }}
           BN_AUTO_IMPORT_TOKEN: ${{ secrets.BN_AUTO_IMPORT_TOKEN }}
-          GOONET_TOTAL: ${{ inputs.total || '1000' }}
+          GOONET_TOTAL: ${{ inputs.total || '0' }}
           GOONET_SCAN_MINUTES: ${{ inputs.minutes || '90' }}
           GOONET_MAX_MODELS: ${{ inputs.models || '0' }}
         run: python japan_scraper.py

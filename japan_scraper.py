@@ -34,7 +34,16 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
 BN_AUTO_URL = os.environ.get("BN_AUTO_URL", "").rstrip("/")
 BN_AUTO_IMPORT_TOKEN = os.environ.get("BN_AUTO_IMPORT_TOKEN", "")
-TOTAL = int(os.environ.get("GOONET_TOTAL") or "1000")
+# Сколько новых машин за прогон (0 — само: до FILL_TARGET на сайте, потом раз в неделю)
+TOTAL = int(os.environ.get("GOONET_TOTAL") or "0")
+# Заполнение каталога: пока машин на сайте меньше FILL_TARGET — каждый прогон добавляет
+# до FILL_PER_RUN новых; дальше раз в неделю (WEEKLY_DAY, 0 — понедельник) — WEEKLY_NEW
+FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "5500")
+FILL_PER_RUN = int(os.environ.get("GOONET_FILL_PER_RUN") or "1000")
+WEEKLY_NEW = int(os.environ.get("GOONET_WEEKLY_NEW") or "1000")
+WEEKLY_DAY = int(os.environ.get("GOONET_WEEKLY_DAY") or "5")
+# Сколько машин с сайта, не встреченных при обходе, проверить заново (жива ли, дополнить)
+VERIFY_LIMIT = int(os.environ.get("GOONET_VERIFY") or "300")
 SHARE_160 = float(os.environ.get("GOONET_SHARE_160") or "0.75")
 MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2017")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
@@ -45,7 +54,10 @@ BATCH_PAUSE = float(os.environ.get("GOONET_BATCH_PAUSE") or "10")
 MAX_MODELS = int(os.environ.get("GOONET_MAX_MODELS") or "0")
 # Сколько объявлений модели открывать, чтобы найти машину до 160 л.с.
 RESOLVE_PER_MODEL = 4
-MAX_PHOTO_BYTES = 850 * 1024
+# Фото: WebP до 960 px и до 150 КБ (храним в базе bn-auto, диск ограничен)
+MAX_PHOTO_BYTES = 150 * 1024
+PHOTO_MAX_WIDTH = 960
+PHOTO_QUALITY = 72
 YEAR_BANDS = [("2022–2024", 2022, 2024, 0.70), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.15)]
 
 # Марки goo-net → как их пишем на сайте. Грузовики и спецтехнику не берём.
@@ -113,20 +125,22 @@ class Fetcher:
             img = Image.open(io.BytesIO(resp.content)).convert("RGB")
         except Exception:
             return None
-        quality, max_width = 82, 1000
+        # WebP: при том же качестве на ~40 % легче JPEG. 960 px по ширине хватает
+        # для страницы объявления; тяжёлые снимки сжимаем сильнее, затем уменьшаем.
+        quality, max_width = PHOTO_QUALITY, PHOTO_MAX_WIDTH
         while True:
-            im = img
-            if im.width > max_width:
-                im = im.resize((max_width, max(1, int(im.height * max_width / im.width))))
+            resized = img
+            if resized.width > max_width:
+                resized = resized.resize((max_width, max(1, round(resized.height * max_width / resized.width))), Image.LANCZOS)
             buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=quality)
+            resized.save(buf, format="WEBP", quality=quality, method=6)
             data = buf.getvalue()
-            if len(data) <= MAX_PHOTO_BYTES or (quality <= 40 and max_width <= 480):
-                return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
-            if quality > 40:
-                quality -= 12
+            if len(data) <= MAX_PHOTO_BYTES or max_width <= 640:
+                return "data:image/webp;base64," + base64.b64encode(data).decode("ascii")
+            if quality > 55:
+                quality -= 8
             else:
-                max_width = int(max_width * 0.8)
+                max_width = int(max_width * 0.85)
 
 
 def text_lines(html: str) -> list[str]:
@@ -274,11 +288,18 @@ def year_band(year):
     return next((name for name, lo, hi, _ in YEAR_BANDS if year and lo <= year <= hi), None)
 
 
-def pick(groups: dict, total: int, resolve) -> list[dict]:
+def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list[dict]:
     """Как у Кореи: по машине на модель (до 160 л.с., если есть), затем добор по кругу по
-    моделям — «до 160» до 75%, мощных до 25%, внутри — по долям лет."""
+    моделям — «до 160» до 75%, мощных до 25%, внутри — по долям лет.
+
+    Модели, которых на сайте меньше (on_site — сколько машин модели уже есть), идут первыми:
+    сначала появляются модели, которых ещё нет, потом добираются редкие."""
+    on_site = on_site or {}
+    order = sorted(groups, key=lambda k: (on_site.get(k, 0), random.random()))
+    groups = {k: groups[k] for k in order}
     picked, used, count, per_group = [], set(), {}, {}
     rank = {name: i for i, (name, *_) in enumerate(YEAR_BANDS)}
+    quota = {"le160": round(total * SHARE_160), "gt160": total - round(total * SHARE_160)}
 
     def power(car, key):
         if car.get("power") is None and not car.get("_resolved") and per_group.get(key, 0) < RESOLVE_PER_MODEL * 3:
@@ -298,8 +319,15 @@ def pick(groups: dict, total: int, resolve) -> list[dict]:
 
     for key, cars in groups.items():
         cars.sort(key=lambda c: rank.get(year_band(c["year"]), 9))
-        best = (next((c for c in cars[:RESOLVE_PER_MODEL] if power(c, key) == "le160"), None)
-                or next((c for c in cars if c.get("power") == "gt160"), None))
+    for key, cars in groups.items():
+        # По машине — только моделям, которых на сайте ещё нет, и в пределах долей
+        if on_site.get(key) or len(picked) >= total:
+            continue
+        best = None
+        if total_of("le160") < quota["le160"]:
+            best = next((c for c in cars[:RESOLVE_PER_MODEL] if power(c, key) == "le160"), None)
+        if not best and total_of("gt160") < quota["gt160"]:
+            best = next((c for c in cars if c.get("power") == "gt160"), None)
         if best:
             take(best)
     covered = len(picked)
@@ -334,7 +362,7 @@ def pick(groups: dict, total: int, resolve) -> list[dict]:
     fill_kind("le160", max(round(total * SHARE_160), math.ceil(total_of("gt160") / ratio)))
     fill_kind("gt160", min(total - total_of("le160"), math.floor(total_of("le160") * ratio)))
     years = {name: sum(v for (_, b), v in count.items() if b == name) for name, *_ in YEAR_BANDS}
-    log(f"Выбрано: моделей {covered} из {len(groups)}, машин {len(picked)} — до 160 л.с. {total_of('le160')}, "
+    log(f"Выбрано: новых моделей {covered} (на сайте нет {sum(1 for k in groups if not on_site.get(k))} из {len(groups)}), машин {len(picked)} — до 160 л.с. {total_of('le160')}, "
         f"мощнее {total_of('gt160')}; по годам: " + ", ".join(f"{k} — {v}" for k, v in years.items()))
     return picked
 
@@ -345,11 +373,13 @@ def fetch_known() -> dict:
     if not BN_AUTO_URL or not BN_AUTO_IMPORT_TOKEN:
         return {}
     try:
-        resp = httpx.get(f"{BN_AUTO_URL}/api/live-listings/known", params={"source": "goonet"},
-                         headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=30)
+        resp = httpx.get(f"{BN_AUTO_URL}/api/live-listings/known", params={"source": "goonet", "all": "1"},
+                         headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=60)
         resp.raise_for_status()
         items = {str(i["id"]): i for i in resp.json().get("items") or []}
-        log(f"Уже есть на сайте: {len(items)}")
+        good = sum(1 for i in items.values() if i.get("complete"))
+        log(f"На сайте: {len(items)}, из них с полной информацией {good}, "
+            f"в каталоге {sum(1 for i in items.values() if i.get('published'))}")
         return items
     except Exception as error:
         log(f"Список машин с сайта не получен ({error})")
@@ -392,6 +422,8 @@ def to_listing(car: dict, f: Fetcher) -> dict:
 
 
 def push(listings: list[dict]):
+    if not listings:
+        return
     if not BN_AUTO_URL or not BN_AUTO_IMPORT_TOKEN:
         log(f"BN_AUTO_URL / BN_AUTO_IMPORT_TOKEN не заданы — {len(listings)} машин не отправлены")
         return
@@ -412,8 +444,10 @@ def push(listings: list[dict]):
 
 # ---------- прогон ----------
 
-def scan(f: Fetcher, known: dict) -> dict:
-    """{(марка, модель): [машины с MIN_YEAR года]} — первые страницы всех моделей всех марок."""
+def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
+    """({(марка, модель): [новые машины с MIN_YEAR года]}, [машины с сайта, встреченные в обходе]) —
+    первые страницы всех моделей всех марок. Машины с сайта с полной информацией не выбираются
+    заново — им только отметка «ещё в продаже»; неполные — кандидаты на обновление."""
     started = time.time()
     deadline = started + SCAN_MINUTES * 60
     bl = brands(f)
@@ -430,7 +464,7 @@ def scan(f: Fetcher, known: dict) -> dict:
             by_brand.setdefault(b, []).append((b, m))
         jobs = [x for group in zip(*[v[:MAX_MODELS] for v in by_brand.values()]) for x in group][:MAX_MODELS]
         log(f"Проверка: только {len(jobs)} моделей")
-    groups, shown = {}, False
+    groups, touched, shown = {}, [], False
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(f.get, f"{BASE}/usedcar/brand-{b}/car-{m}/"): (b, m) for b, m in jobs}
         for n, fut in enumerate(as_completed(futures), 1):
@@ -441,6 +475,9 @@ def scan(f: Fetcher, known: dict) -> dict:
                 shown = True
             for c in cards:
                 info = known.get(c["id"])
+                if info and info.get("complete"):
+                    touched.append(c)
+                    continue
                 if info and info.get("year"):
                     c["year"] = c.get("year") or int(info["year"])
                 if c["year"] and c["year"] < MIN_YEAR:
@@ -457,17 +494,75 @@ def scan(f: Fetcher, known: dict) -> dict:
                 for x in futures:
                     x.cancel()
                 break
-    for cars in groups.values():
-        # Машины, которые уже на сайте, — первыми: сайт не разрастается от прогона к прогону
-        cars.sort(key=lambda c: c["id"] not in known)
-    log(f"Обход: моделей с машинами {len(groups)}, машин {sum(map(len, groups.values()))}, страниц {f.count}")
-    return groups
+    log(f"Обход: моделей с новыми машинами {len(groups)}, новых машин {sum(map(len, groups.values()))}, "
+        f"машин с сайта встречено {len(touched)}, страниц {f.count}")
+    return groups, touched
+
+
+def run_size(known: dict) -> int:
+    """Сколько новых машин добавить: вручную (GOONET_TOTAL), до заполнения каталога
+    (FILL_TARGET) — по FILL_PER_RUN за прогон, потом раз в неделю WEEKLY_NEW; 0 — сегодня не нужно."""
+    if TOTAL:
+        return TOTAL
+    good = sum(1 for i in known.values() if i.get("complete") and i.get("published"))
+    if good < FILL_TARGET:
+        n = min(FILL_PER_RUN, FILL_TARGET - good)
+        log(f"Заполнение каталога: на сайте {good} из {FILL_TARGET} — добавим {n}")
+        return n
+    if time.gmtime().tm_wday == WEEKLY_DAY:
+        log(f"Каталог заполнен ({good}) — еженедельное обновление: до {WEEKLY_NEW} новых")
+        return WEEKLY_NEW
+    log(f"Каталог заполнен ({good}), сегодня не день обновления — только отметки и проверка")
+    return 0
+
+
+def complete(listing: dict) -> bool:
+    """Полная информация: фото, цена, год и то, по чему считается таможня (объём и мощность)."""
+    spec = listing.get("spec") or {}
+    ev = spec.get("Топливо") == "электро"
+    return bool(listing.get("photo_url") and listing.get("price_value") and listing.get("year")
+                and (spec.get("Мощность, л.с.") or ev) and (spec.get("Объём, см³") or ev))
+
+
+def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
+    """Машины с сайта, не встреченные в обходе: давно не обновлявшиеся и неполные открываем
+    заново. Жива — отметка «ещё в продаже» (а неполную — дополняем); снята — не трогаем,
+    через 30 дней сайт её скроет."""
+    todo = [(k, i) for k, i in known.items() if k not in seen and i.get("url")
+            and (not i.get("complete") or (i.get("seen_days") or 0) >= 7)]
+    todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
+    out, alive = [], 0
+    for key, info in todo[:VERIFY_LIMIT]:
+        html = f.get(info["url"])
+        d = parse_detail(html) if html else {}
+        if not d.get("price_jpy"):
+            continue
+        alive += 1
+        car = {"id": key, "url": info["url"], "make": info.get("make"), "model": info.get("model"),
+               "year": d.get("year") or info.get("year"), "detail": d}
+        if info.get("complete"):
+            out.append({"external_id": key, "source_url": info["url"], "price_value": d["price_jpy"],
+                        "mileage_km": d.get("mileage_km")})
+        elif car["make"] and car["model"]:
+            listing = to_listing(car, f)
+            if complete(listing):
+                out.append(listing)
+    log(f"Проверено машин с сайта, не встреченных в обходе: {min(len(todo), VERIFY_LIMIT)} из {len(todo)}, "
+        f"в продаже {alive}")
+    return out
 
 
 def main():
     f = Fetcher()
     known = fetch_known()
-    groups = scan(f, known)
+    total = run_size(known)
+    groups, touched = scan(f, known)
+    seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
+    # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
+    push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km")} for c in touched])
+    push(verify(f, known, seen))
+    if not total:
+        return
 
     def resolve(car):
         """Страница объявления: мощность (最高出力), год, цена, характеристики."""
@@ -481,30 +576,35 @@ def main():
             return None
         return power_class(d)
 
-    cars = pick(groups, TOTAL, resolve)
+    on_site = {}
+    by_name = {}
+    for info in known.values():
+        if info.get("complete") and info.get("published"):
+            by_name[(info.get("make"), info.get("model"))] = by_name.get((info.get("make"), info.get("model")), 0) + 1
+    for (b, m) in groups:
+        on_site[(b, m)] = by_name.get((MAKES[b], model_name(m)), 0)
+    cars = pick(groups, total, resolve, on_site)
     chunks = [cars[i:i + BATCH] for i in range(0, len(cars), BATCH)]
-    sent = 0
+    sent = rejected = 0
     for n, chunk in enumerate(chunks, 1):
         log(f"=== Порция {n}/{len(chunks)} ===")
         listings = []
         for car in chunk:
-            if car["id"] in known and "detail" not in car:
-                listings.append({"external_id": car["id"], "source_url": car["url"], "mileage_km": car.get("mileage_km")})
-                continue
             if "detail" not in car:
                 resolve(car)
             listing = to_listing(car, f)
-            if listing["price_value"]:
+            if complete(listing):
                 listings.append(listing)
+            else:
+                rejected += 1
         push(listings)
         sent += len(listings)
         if n < len(chunks):
             log(f"Пауза {BATCH_PAUSE:g} мин")
             time.sleep(BATCH_PAUSE * 60)
-    log(f"Готово: отправлено {sent}, запросов к goo-net {f.count}")
+    log(f"Готово: отправлено {sent}, отсеяно без фото/цены/мощности {rejected}, запросов к goo-net {f.count}")
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1)
-
 
 if __name__ == "__main__":
     main()
