@@ -1,0 +1,47 @@
+name: Japan (goo-net) scrape
+
+# Объявления goo-net.com → bn-auto (раздел «Авто из Японии»), см. japan_scraper.py.
+# Нужны секреты репозитория BN_AUTO_URL и BN_AUTO_IMPORT_TOKEN (те же, что у Кореи и Китая);
+# без них сборщик только собирает и печатает, ничего не отправляя.
+on:
+  schedule:
+    # Среда и суббота, 03:00 UTC (13:00 по Владивостоку) — не в дни Кореи (пн, чт) и Китая (вт, пт)
+    - cron: "0 3 * * 3,6"
+  workflow_dispatch:
+    inputs:
+      total:
+        description: "Сколько машин собрать (все модели с 2017 г., 75 % до 160 л.с.)"
+        default: "1000"
+      minutes:
+        description: "Сколько минут обходить марки и модели (для проверки хватит 5)"
+        default: "90"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    # Обход (до 1,5 ч) + 1000 машин порциями по 100 с паузой 10 минут
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install "httpx>=0.27,<1.0" "beautifulsoup4>=4.12,<5.0" "lxml>=5.0,<6.0" "pillow>=10"
+      - name: Scrape goo-net and push to bn-auto
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUNBUFFERED: "1"
+          BN_AUTO_URL: ${{ secrets.BN_AUTO_URL }}
+          BN_AUTO_IMPORT_TOKEN: ${{ secrets.BN_AUTO_IMPORT_TOKEN }}
+          GOONET_TOTAL: ${{ inputs.total || '1000' }}
+          GOONET_SCAN_MINUTES: ${{ inputs.minutes || '90' }}
+        run: python japan_scraper.py
+      - name: Upload batch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goonet-batch
+          path: goonet_batch.json
+          retention-days: 14
+          if-no-files-found: ignore
