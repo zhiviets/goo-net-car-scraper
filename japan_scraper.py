@@ -414,12 +414,16 @@ def year_band(year):
     return next((name for name, lo, hi, _ in YEAR_BANDS if year and lo <= year <= hi), None)
 
 
-def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list[dict]:
+def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take=None) -> list[dict]:
     """Как у Кореи: по машине на модель (до 160 л.с., если есть), затем добор по кругу по
     моделям — «до 160» до 75%, мощных до 25%, внутри — по долям лет.
 
     Модели, которых на сайте меньше (on_site — сколько машин модели уже есть), идут первыми:
-    сначала появляются модели, которых ещё нет, потом добираются редкие."""
+    сначала появляются модели, которых ещё нет, потом добираются редкие.
+
+    on_take(car) — вызывается для каждой выбранной машины сразу (отправка на сайт порциями по
+    ходу отбора, а не после него: отбор открывает объявления и идёт часами). Когда выходит
+    время прогона (RUN_MINUTES), новые объявления не открываются — отбор заканчивается."""
     on_site = on_site or {}
     order = sorted(groups, key=lambda k: (on_site.get(k, 0), random.random()))
     groups = {k: groups[k] for k in order}
@@ -428,6 +432,8 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
     quota = {"le160": round(total * SHARE_160), "gt160": total - round(total * SHARE_160)}
 
     def power(car, key):
+        if time.time() - STARTED > RUN_MINUTES * 60:
+            return car.get("power")
         if car.get("power") is None and not car.get("_resolved") and per_group.get(key, 0) < RESOLVE_PER_MODEL * 3:
             car["_resolved"] = True
             per_group[key] = per_group.get(key, 0) + 1
@@ -442,6 +448,8 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
         used.add(car["id"])
         k = (car["power"], year_band(car["year"]))
         count[k] = count.get(k, 0) + 1
+        if on_take:
+            on_take(car)
 
     def total_of(kind):
         return sum(v for (k, _), v in count.items() if k == kind)
@@ -678,8 +686,8 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
     out, alive = [], 0
     for key, info in todo[:VERIFY_LIMIT]:
-        if time.time() - STARTED > (RUN_MINUTES - 60) * 60:
-            break         # время нужно новым машинам — остальные проверим в следующий прогон
+        if time.time() - STARTED > (RUN_MINUTES + 20) * 60:
+            break         # не упереться в лимит GitHub — остальные проверим в следующий прогон
         html = f.get(info["url"])
         d = parse_detail(html) if html else {}
         if not d.get("price_jpy"):
@@ -710,7 +718,6 @@ def main():
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km")} for c in touched])
-    push(verify(f, known, seen))
     if not total:
         return
 
@@ -733,29 +740,43 @@ def main():
             by_name[(info.get("make"), info.get("model"))] = by_name.get((info.get("make"), info.get("model")), 0) + 1
     for (b, m) in groups:
         on_site[(b, m)] = by_name.get((MAKES[b], model_name(m)), 0)
-    cars = pick(groups, total, resolve, on_site)
-    chunks = [cars[i:i + BATCH] for i in range(0, len(cars), BATCH)]
-    sent = rejected = 0
-    for n, chunk in enumerate(chunks, 1):
-        if time.time() - STARTED > RUN_MINUTES * 60:
-            log(f"Прошло {RUN_MINUTES:g} мин — остальные {len(cars) - (n - 1) * BATCH} машин в следующий прогон")
-            break
-        log(f"=== Порция {n}/{len(chunks)} ===")
+    # Порциями по ходу отбора: набралось BATCH выбранных машин — фото, отправка на сайт,
+    # пауза BATCH_PAUSE минут, отбор продолжается
+    buf, stats = [], {"sent": 0, "rejected": 0, "batches": 0}
+
+    def flush(last=False):
+        if not buf:
+            return
+        stats["batches"] += 1
+        log(f"=== Порция {stats['batches']}: {len(buf)} машин ===")
         listings = []
-        for car in chunk:
+        for car in buf:
             if "detail" not in car:
                 resolve(car)
             listing = to_listing(car, f)
             if complete(listing):
                 listings.append(listing)
             else:
-                rejected += 1
+                stats["rejected"] += 1
+        buf.clear()
         push(listings)
-        sent += len(listings)
-        if n < len(chunks):
+        stats["sent"] += len(listings)
+        log(f"Отправлено всего {stats['sent']}, отсеяно {stats['rejected']}, {(time.time() - STARTED) / 60:.0f} мин от старта")
+        if not last:
             pause = BATCH_PAUSE * random.uniform(0.7, 1.3)
             log(f"Пауза {pause:.1f} мин")
             time.sleep(pause * 60)
+
+    def on_take(car):
+        buf.append(car)
+        if len(buf) >= BATCH:
+            flush()
+
+    cars = pick(groups, total, resolve, on_site, on_take)
+    flush(last=True)
+    # Проверка машин с сайта — после новых: во время заполнения важнее новые машины
+    push(verify(f, known, seen))
+    sent, rejected = stats["sent"], stats["rejected"]
     log(f"Готово: отправлено {sent}, отсеяно без фото/цены/мощности {rejected}, запросов к goo-net {f.count}")
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1)
