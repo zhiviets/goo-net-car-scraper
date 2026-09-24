@@ -46,8 +46,10 @@ UPDATE_DAYS = {int(d) for d in (os.environ.get("GOONET_UPDATE_DAYS") or "2,5").s
 UPDATE_NEW = int(os.environ.get("GOONET_UPDATE_NEW") or "600")
 UPDATE_BATCH = int(os.environ.get("GOONET_UPDATE_BATCH") or "150")
 UPDATE_PAUSE = float(os.environ.get("GOONET_UPDATE_PAUSE") or "30")
-# Разнообразие: не больше стольких машин одной модели за прогон
-PER_MODEL_RUN = int(os.environ.get("GOONET_PER_MODEL_RUN") or "4")
+# Разнообразие: не больше стольких машин одной модели за прогон — отдельно до 160 л.с. и мощнее,
+# чтобы доля 75/25 сохранялась
+PER_MODEL_RUN = {"le160": int(os.environ.get("GOONET_PER_MODEL_LE160") or "3"),
+                 "gt160": int(os.environ.get("GOONET_PER_MODEL_OTHER") or "2")}
 # Сколько машин с сайта, не встреченных при обходе, проверить заново (жива ли, дополнить)
 VERIFY_LIMIT = int(os.environ.get("GOONET_VERIFY") or "300")
 SHARE_160 = float(os.environ.get("GOONET_SHARE_160") or "0.75")
@@ -335,7 +337,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
     taken = {}
 
     def take(car, key):
-        taken[key] = taken.get(key, 0) + 1
+        taken[(key, car["power"])] = taken.get((key, car["power"]), 0) + 1
         picked.append(car)
         used.add(car["id"])
         k = (car["power"], year_band(car["year"]))
@@ -367,7 +369,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
             for key, cars in groups.items():
                 if not need():
                     break
-                if taken.get(key, 0) >= PER_MODEL_RUN:
+                if taken.get((key, kind), 0) >= PER_MODEL_RUN[kind]:
                     continue
                 i = pos[key]
                 while i < len(cars):
@@ -382,6 +384,11 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None) -> list
                 pos[key] = i
 
     def fill_kind(kind, target):
+        # С лимитом на модель больше не взять: доли лет считаем от реально доступного
+        room = sum(min(PER_MODEL_RUN[kind] - taken.get((k, kind), 0),
+                       sum(1 for c in cars if c.get("power") in (kind, None) and c["id"] not in used))
+                   for k, cars in groups.items())
+        target = min(target, total_of(kind) + max(room, 0))
         for name, _, _, w in YEAR_BANDS:
             want = round(target * w)
             fill(kind, name, lambda: count.get((kind, name), 0) < want and total_of(kind) < target)
