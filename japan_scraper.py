@@ -832,8 +832,8 @@ def main():
     for info in known.values():
         if not (info.get("complete") and info.get("published")):
             continue
-        hp = int(re.sub(r"\D", "", str(info.get("hp") or "")) or 0)
-        kind = "gt160" if hp > 160 or "электро" in (info.get("text") or "") else "le160"
+        hp = info.get("power") or int(re.sub(r"\D", "", str(info.get("hp") or "")) or 0)
+        kind = "gt160" if hp > 160 or info.get("electric") or "электро" in (info.get("text") or "") else "le160"
         band = year_band(int(info["year"]) if info.get("year") else None)
         if band:
             have[(kind, band)] = have.get((kind, band), 0) + 1
