@@ -894,6 +894,11 @@ def main():
                 drom_stats["power"] += 1
                 note("мощность с drom.ru")
         if not d.get("hp"):
+            if opened.get("нет мощности", 0) < 6:
+                # Образцы страниц без мощности — где на них мощность и есть ли ссылка на каталог goo-net
+                near = [ln[:80] for ln in text_lines(html) if re.search(r"出力|馬力|kW|PS|ps|エンジン|型式", ln)][:12]
+                cats = sorted(set(re.findall(r'href="([^"]*/catalog/[^"]*)"', html)))[:4]
+                log(f"  без мощности {car['url']}: {near} | каталог: {cats}")
             return note("нет мощности")
         if not (d.get("cc") or car.get("cc") or d.get("fuel") == "электро"):
             return note("нет объёма")
