@@ -591,14 +591,16 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
                 del open_cells[cell]
             continue
         take(*nxt)
-    # Каких-то лет не хватило — добираем машинами тех же классов любых лет (новые первыми)
+    # Каких-то лет не хватило — добираем машинами тех же классов других лет, которых каталогу
+    # ещё не хватает (переполненные годы не берём)
     for kind in KINDS:
         more = candidates(kind, None)
         while len(picked) < total and total_of(kind) < kind_want(kind):
             nxt = next(more, None)
             if nxt is None:
                 break
-            take(*nxt)
+            if want.get((kind, year_band(nxt[0]["year"]))):
+                take(*nxt)
     years = {name: sum(v for (_, b), v in count.items() if b == name) for name, *_ in YEAR_BANDS}
     log(f"Выбрано: новых моделей {covered} (на сайте нет {sum(1 for k in groups if not on_site.get(k))} из {len(groups)}), машин {len(picked)} — до 160 л.с. {total_of('le160')}, "
         f"мощнее {total_of('gt160')}; по годам: " + ", ".join(f"{k} — {v}" for k, v in years.items()))
