@@ -70,6 +70,10 @@ RESOLVE_PER_MODEL = 4
 MAX_PHOTO_BYTES = 150 * 1024
 PHOTO_MAX_WIDTH = 960
 PHOTO_QUALITY = 72
+# Каталог drom.ru (рынок «Япония»): технические характеристики комплектации и мощность, если её нет в
+# объявлении. Страниц drom.ru за прогон — не больше; кэш — drom_cache.json (сохраняется между прогонами)
+DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "300")
+DROM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drom_cache.json")
 YEAR_BANDS = [("2022–2024", 2022, 2024, 0.60), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.15),
               ("2010–2016", 2010, 2016, 0.10)]
 
@@ -636,6 +640,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "Трансмиссия": d.get("trans"),
         "Привод": d.get("drive"),
         "Мощность, л.с.": str(d["hp"]) if d.get("hp") else None,
+        "Суммарная мощность гибрида, л.с.": str(d["hp_total"]) if d.get("hp_total") else None,
         "Объём, см³": str(d.get("cc") or car.get("cc") or "") or None,
         "Турбо": "да" if d.get("turbo") else None,
         "Пробег": f"{d.get('mileage_km') or car.get('mileage_km'):,} км".replace(",", " ")
@@ -659,6 +664,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "price_value": d.get("price_jpy"), "photo_url": photo,
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
         **({"options": d["options"]} if d.get("options") else {}),
+        **({"tech": d["tech"]} if d.get("tech") else {}),
     }
 
 
@@ -805,6 +811,37 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     return out
 
 
+def open_drom():
+    """(каталог drom.ru, закрыть) — браузер: таблицы комплектаций drom.ru дорисовывает скриптом.
+    Нет Playwright (запуск без него) — (None, ничего)."""
+    try:
+        from playwright.sync_api import sync_playwright
+        import drom_specs
+    except ImportError:
+        log("drom.ru: Playwright не установлен — без технических характеристик")
+        return None, lambda: None
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+    drom = drom_specs.DromCatalog(DROM_CACHE, drom_specs.playwright_fetcher(browser.new_context(user_agent=UA, locale="ru-RU")),
+                                  max_requests=DROM_PAGES, log=log)
+
+    def close():
+        drom.save()
+        browser.close()
+        pw.stop()
+    return drom, close
+
+
+def drom_car(car: dict) -> dict:
+    """Машина goo-net → признаки для поиска комплектации в каталоге drom.ru (рынок «Япония»)."""
+    import drom_specs
+    d = car.get("detail") or {}
+    return {"make": car.get("make"), "model": car.get("model"), "market": "japan",
+            "year": d.get("year") or car.get("year"), "cc": d.get("cc") or car.get("cc"),
+            "fuel": drom_specs.norm_fuel(d.get("fuel")), "drive": drom_specs.norm_drive(d.get("drive")),
+            "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or ""}
+
+
 def main():
     f = Fetcher()
     known = fetch_known()
@@ -825,6 +862,16 @@ def main():
         opened[why] = opened.get(why, 0) + 1
         return None
 
+    drom, close_drom = open_drom() if total else (None, lambda: None)
+    drom_stats = {"power": 0, "tech": 0}
+
+    def drom_found(car):
+        """Комплектация на drom.ru (один поиск на машину; повторно — из памяти)."""
+        d = car.setdefault("detail", {})
+        if "_drom" not in d:
+            d["_drom"] = drom.power(drom_car(car)) if drom and car.get("make") and car.get("model") else None
+        return d["_drom"]
+
     def resolve(car):
         """Страница объявления: мощность (最高出力), год, цена, характеристики."""
         html = f.get(car["url"])
@@ -839,6 +886,13 @@ def main():
         # достаётся другой (раньше такие выбирались и отсеивались уже при отправке)
         if not d.get("price_jpy"):
             return note("нет цены")
+        if not d.get("hp") and d.get("price_jpy"):
+            # Мощности в объявлении нет — берём мощность комплектации из каталога drom.ru
+            found = drom_found(car)
+            if found:
+                d["hp"], d["hp_total"] = found["hp"], found.get("hp_total")
+                drom_stats["power"] += 1
+                note("мощность с drom.ru")
         if not d.get("hp"):
             return note("нет мощности")
         if not (d.get("cc") or car.get("cc") or d.get("fuel") == "электро"):
@@ -880,6 +934,12 @@ def main():
         for car in buf:
             if "detail" not in car:
                 resolve(car)
+            # Технические характеристики комплектации с drom.ru (разгон, расход, размеры, масса…)
+            found = drom_found(car) if drom else None
+            tech = drom.tech(found.get("trim")) if found else None
+            if tech:
+                car["detail"]["tech"] = tech
+                drom_stats["tech"] += 1
             listing = to_listing(car, f)
             if complete(listing):
                 listings.append(listing)
@@ -903,12 +963,16 @@ def main():
     log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
                                                                          sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
+    close_drom()
+    if drom:
+        log(f"drom.ru: мощность для {drom_stats['power']} машин без неё в объявлении, технические характеристики "
+            f"у {drom_stats['tech']} (совпадения: {drom.stats}, страниц drom.ru {drom.requests})")
     # Проверка машин с сайта — после новых: во время заполнения важнее новые машины
     push(verify(f, known, seen))
     sent, rejected = stats["sent"], stats["rejected"]
     log(f"Готово: отправлено {sent}, отсеяно без фото/цены/мощности {rejected}, запросов к goo-net {f.count}")
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
-        json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1)
+        json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1, default=str)
 
 if __name__ == "__main__":
     main()

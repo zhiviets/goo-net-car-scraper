@@ -46,7 +46,16 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install "httpx>=0.27,<1.0" "beautifulsoup4>=4.12,<5.0" "lxml>=5.0,<6.0" "pillow>=10"
+        run: |
+          pip install "httpx>=0.27,<1.0" "beautifulsoup4>=4.12,<5.0" "lxml>=5.0,<6.0" "pillow>=10" "playwright>=1.47,<2.0"
+          python -m playwright install --with-deps chromium
+      # Кэш каталога drom.ru (страницы поколений и комплектаций) — между прогонами
+      - name: Restore drom.ru cache
+        uses: actions/cache@v4
+        with:
+          path: drom_cache.json
+          key: drom-cache-${{ github.run_id }}
+          restore-keys: drom-cache-
       - name: Scrape goo-net and push to bn-auto
         env:
           PYTHONIOENCODING: utf-8
