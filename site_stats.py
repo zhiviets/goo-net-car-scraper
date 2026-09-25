@@ -1,5 +1,7 @@
 """Сколько машин на сайте по странам (для проверки заполнения). Ничего не меняет."""
 
+import collections
+import json
 import os
 import re
 
@@ -30,3 +32,7 @@ for source in ("goonet", "encar", "che168"):
     for i in bad[:12]:
         print(f"   неполная: {i.get('id')} {i.get('make')} {i.get('model')} {i.get('year')} cc={i.get('cc')} hp={i.get('hp')} "
               f"фото {i.get('photo_kb')} КБ, точная мощность {i.get('exact_power')}, «{(i.get('text') or '')[:60]}»")
+
+    # Модели без точной мощности (мощность только оценена) — для сопоставления с drom.ru
+    rough = collections.Counter(f"{i.get('make')}|{i.get('model')}" for i in ok if not i.get("exact_power"))
+    print(f"   без точной мощности {sum(rough.values())}: " + json.dumps(dict(rough.most_common()), ensure_ascii=False))
