@@ -499,15 +499,22 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
                 seen_cls.setdefault((key, cc), set()).add(car["power"])
         return car.get("power")
 
-    def is_kind(car, key, kind):
-        """Машина нужного класса? Заведомо другой по карточке — объявление не открываем."""
-        if car.get("power") is None and not car.get("_resolved"):
-            guess = guess_class(car)
-            same = seen_cls.get((key, car.get("cc")))
-            if not guess and same and len(same) == 1:
-                guess = next(iter(same))
-            if guess and guess != kind:
-                return False
+    def guess(car, key):
+        """Класс по карточке или по открытым машинам той же модели с тем же объёмом (None — не угадать)."""
+        if car.get("power") is not None or car.get("_resolved"):
+            return car.get("power")
+        g = guess_class(car)
+        same = seen_cls.get((key, car.get("cc")))
+        if not g and same and len(same) == 1:
+            g = next(iter(same))
+        return g
+
+    def is_kind(car, key, kind, sure_only=False):
+        """Машина нужного класса? Заведомо другой по карточке — объявление не открываем;
+        sure_only — открываем только те, что по карточке точно этого класса."""
+        g = guess(car, key)
+        if (g and g != kind) or (sure_only and g != kind):
+            return False
         return power(car, key) == kind
 
     def room(car, kind):
@@ -540,14 +547,17 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             # и годы — из клетки, набранной меньше всего
             fits = sorted((c for c in cars if room(c, kind)),
                           key=lambda c: count.get((kind, year_band(c["year"])), 0) / want[(kind, year_band(c["year"]))])
-            best = next((c for c in fits[:RESOLVE_PER_MODEL] if is_kind(c, key, kind)), None)
+            # Только машины, класс которых виден по карточке: сомнительные (2–3 л, редкие модели)
+            # открываются впустую чаще всего — их черёд в доборе, когда верные кончатся
+            best = next((c for c in fits[:RESOLVE_PER_MODEL * 2] if is_kind(c, key, kind, sure_only=True)), None)
             if best:
                 take(best, key)
                 break
     covered = len(picked)
 
-    def candidates(kind, band):
-        """Следующая машина класса kind и лет band — по кругу моделей, по машине с модели за круг."""
+    def candidates(kind, band, sure_only=False):
+        """Следующая машина класса kind и лет band — по кругу моделей, по машине с модели за круг;
+        sure_only — только машины, класс которых виден по карточке."""
         pos = {k: 0 for k in groups}
         progress = True
         while progress:
@@ -562,7 +572,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
                     if c["id"] in used or (band and year_band(c["year"]) != band):
                         continue
                     # год мог уточниться на странице объявления
-                    if is_kind(c, key, kind) and (not band or year_band(c["year"]) == band):
+                    if is_kind(c, key, kind, sure_only) and (not band or year_band(c["year"]) == band):
                         pos[key] = i
                         progress = True
                         yield c, key
@@ -570,12 +580,15 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
                 pos[key] = i
 
     # Клетки вперемешку: каждый раз — та, что набрана меньше всего относительно нужного
-    open_cells = {cell: candidates(*cell) for cell, v in want.items() if v > 0}
+    # Сначала машины, класс которых виден по карточке, потом сомнительные
+    open_cells = {cell: [candidates(*cell, sure_only=True), candidates(*cell)] for cell, v in want.items() if v > 0}
     while open_cells and len(picked) < total:
         cell = min(open_cells, key=lambda c: count.get(c, 0) / want[c])
-        nxt = next(open_cells[cell], None) if count.get(cell, 0) < want[cell] else None
+        nxt = next(open_cells[cell][0], None) if count.get(cell, 0) < want[cell] else None
         if nxt is None:
-            del open_cells[cell]
+            open_cells[cell].pop(0)
+            if not open_cells[cell] or count.get(cell, 0) >= want[cell]:
+                del open_cells[cell]
             continue
         take(*nxt)
     # Каких-то лет не хватило — добираем машинами тех же классов любых лет (новые первыми)
@@ -804,21 +817,33 @@ def main():
     if not total:
         return
 
+    opened = {}
+
+    def note(why):
+        opened[why] = opened.get(why, 0) + 1
+        return None
+
     def resolve(car):
         """Страница объявления: мощность (最高出力), год, цена, характеристики."""
         html = f.get(car["url"])
         if not html:
-            return None
+            return note("страница не открылась")
         d = parse_detail(html)
         car["detail"] = d
         car["year"] = d.get("year") or car["year"]
         if car["year"] and car["year"] < MIN_YEAR:
-            return None
+            return note("старше MIN_YEAR")
         # Без цены, мощности или объёма сайт машину не примет — не выбираем её, место
         # достаётся другой (раньше такие выбирались и отсеивались уже при отправке)
-        if not d.get("price_jpy") or not d.get("hp") or not (d.get("cc") or car.get("cc") or d.get("fuel") == "электро"):
-            return None
-        return power_class(d)
+        if not d.get("price_jpy"):
+            return note("нет цены")
+        if not d.get("hp"):
+            return note("нет мощности")
+        if not (d.get("cc") or car.get("cc") or d.get("fuel") == "электро"):
+            return note("нет объёма")
+        cls = power_class(d)
+        note("до 160 л.с." if cls == "le160" else "мощнее 160")
+        return cls
 
     on_site = {}
     by_name = {}
@@ -873,6 +898,8 @@ def main():
             flush()
 
     cars = pick(groups, total, resolve, on_site, on_take, have)
+    log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
+                                                                         sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
     # Проверка машин с сайта — после новых: во время заполнения важнее новые машины
     push(verify(f, known, seen))
