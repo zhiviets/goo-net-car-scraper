@@ -972,6 +972,9 @@ def main():
     if drom:
         log(f"drom.ru: мощность для {drom_stats['power']} машин без неё в объявлении, технические характеристики "
             f"у {drom_stats['tech']} (совпадения: {drom.stats}, страниц drom.ru {drom.requests})")
+        if drom.missing:
+            top = sorted(drom.missing.items(), key=lambda x: -x[1])[:25]
+            log("drom.ru: не найдены модели — " + ", ".join(f"{k} ({v})" for k, v in top))
     # Проверка машин с сайта — после новых: во время заполнения важнее новые машины
     push(verify(f, known, seen))
     sent, rejected = stats["sent"], stats["rejected"]
