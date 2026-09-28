@@ -89,8 +89,6 @@ MAKES = {
     "ASTON_MARTIN": "Aston Martin", "TESLA": "Tesla", "CHEVROLET": "Chevrolet", "CADILLAC": "Cadillac",
     "FORD": "Ford", "DS": "DS", "SMART": "Smart", "HYUNDAI": "Hyundai", "BYD": "BYD",
 }
-# Японские марки — всегда правый руль; у остальных (европейские, американские) бывает и левый
-JAPANESE_MAKES = {"Toyota", "Lexus", "Nissan", "Honda", "Mazda", "Subaru", "Mitsubishi", "Suzuki", "Daihatsu", "Mitsuoka"}
 SKIP_BRANDS = {"ISUZU", "MITSUBISHI_FUSO", "HINO", "UD_TRUCKS", "NISSAN_DIESEL"}
 
 
@@ -299,8 +297,6 @@ def parse_detail(html: str) -> dict:
     trans = _after(lines, "ミッション") or ""
     d["trans"] = ("вариатор" if "CVT" in trans else "механика" if "MT" in trans else "автомат" if "AT" in trans else None)
     d["turbo"] = bool(re.search(r"ターボ|スーパーチャージャー", _after(lines, "過給器") or ""))
-    wheel = _after(lines, "ハンドル") or ""
-    d["wheel"] = "Левый" if "左" in wheel else "Правый" if "右" in wheel else None
     color = _after(lines, "車体色") or ""
     d["color"] = next((ru for jp, ru in COLORS if jp in color), None)
     seats = re.search(r"(\d+)", _after(lines, "乗車定員") or "")
@@ -652,7 +648,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "Топливо": d.get("fuel"),
         "Цвет": d.get("color"),
         "Мест": str(d["seats"]) if d.get("seats") else None,
-        "Руль": d.get("wheel") or "Правый",
+        "Руль": "правый",
     }
     photo = None
     for url in d.get("photos") or []:
@@ -783,12 +779,6 @@ def complete(listing: dict) -> bool:
                 and spec.get("Мощность, л.с.") and (spec.get("Объём, см³") or ev))
 
 
-def unchecked_wheel(info: dict) -> bool:
-    """Иномарка на сайте, где руль не прочитан из объявления: раньше всем писали «правый»
-    (строчными) — такие открываем заново и отправляем руль из объявления («Правый»/«Левый»)."""
-    return info.get("make") not in JAPANESE_MAKES and (info.get("wheel") or "правый") == "правый"
-
-
 def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     """Машины с сайта, не встреченные в обходе: давно не обновлявшиеся и неполные открываем
     заново. Жива — отметка «ещё в продаже» (а неполную — дополняем); снята — не трогаем,
@@ -796,7 +786,7 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
     до того, как парсер стал читать оборудование) — им отправляем оборудование."""
     todo = [(k, i) for k, i in known.items() if i.get("url") and (
         (k not in seen and (not i.get("complete") or (i.get("seen_days") or 0) >= 7))
-        or (i.get("complete") and i.get("published") and (i.get("has_options") is False or unchecked_wheel(i))))]
+        or (i.get("complete") and i.get("published") and i.get("has_options") is False))]
     todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
     out, alive = [], 0
     for key, info in todo[:VERIFY_LIMIT]:
@@ -811,8 +801,7 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
                "year": d.get("year") or info.get("year"), "detail": d}
         if info.get("complete"):
             out.append({"external_id": key, "source_url": info["url"], "price_value": d["price_jpy"],
-                        "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {}),
-                        "wheel": d.get("wheel") or "Правый"})
+                        "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {})})
         elif car["make"] and car["model"]:
             listing = to_listing(car, f)
             if complete(listing):
