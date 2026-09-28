@@ -296,7 +296,11 @@ def parse_detail(html: str) -> dict:
                   "задний" if re.search(r"\bFR\b|\bMR\b|\bRR\b", drive) else "передний" if "FF" in drive else None)
     trans = _after(lines, "ミッション") or ""
     d["trans"] = ("вариатор" if "CVT" in trans else "механика" if "MT" in trans else "автомат" if "AT" in trans else None)
-    d["turbo"] = bool(re.search(r"ターボ|スーパーチャージャー", _after(lines, "過給器") or ""))
+    # Турбо: True / False / None (неизвестно) — у кей-каров по нему выбирается мощность на drom.ru
+    charger = _after(lines, "過給器")
+    d["turbo"] = bool(re.search(r"ターボ|スーパーチャージャー", charger)) if charger is not None else None
+    if re.search(r"ターボ", " ".join(filter(None, [_after(lines, "グレード"), (re.search(r"グレード\((.+?)\)", text) or [None, ""])[1]]))):
+        d["turbo"] = True
     color = _after(lines, "車体色") or ""
     d["color"] = next((ru for jp, ru in COLORS if jp in color), None)
     seats = re.search(r"(\d+)", _after(lines, "乗車定員") or "")
@@ -839,7 +843,8 @@ def drom_car(car: dict) -> dict:
     return {"make": car.get("make"), "model": car.get("model"), "market": "japan",
             "year": d.get("year") or car.get("year"), "cc": d.get("cc") or car.get("cc"),
             "fuel": drom_specs.norm_fuel(d.get("fuel")), "drive": drom_specs.norm_drive(d.get("drive")),
-            "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or ""}
+            "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or "",
+            "turbo": True if "ターボ" in (car.get("card_text") or "") else d.get("turbo")}
 
 
 def main():
@@ -863,6 +868,14 @@ def main():
         return None
 
     drom, close_drom = open_drom() if total else (None, lambda: None)
+    if drom:
+        # Моделей, которых нет на drom.ru (грузовики, автобусы — их нет в каталоге легковых), не берём:
+        # у двух третей объявлений goo-net мощности нет, а взять её, кроме drom.ru, негде
+        missing = [k for k in groups if drom.known_missing(MAKES[k[0]], model_name(k[1]))]
+        for k in missing:
+            del groups[k]
+        log(f"Пропущены модели, которых нет на drom.ru: {len(missing)} — "
+            + ", ".join(f"{MAKES[b]} {model_name(m)}" for b, m in missing[:30]))
     drom_stats = {"power": 0, "tech": 0}
 
     def drom_found(car):
