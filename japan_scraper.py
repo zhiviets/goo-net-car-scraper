@@ -91,8 +91,8 @@ MAKES = {
 }
 # Японские марки — на drom.ru есть в разделе «Япония»; иномарки ищем ещё и в «Европе»
 JAPANESE_MAKES = {"Toyota", "Lexus", "Nissan", "Honda", "Mazda", "Subaru", "Mitsubishi", "Suzuki", "Daihatsu", "Mitsuoka"}
-# Грузовики и автобусы не берём — только легковые, минивэны, кей-кары, пикапы
-COMMERCIAL = re.compile(r"\b(truck|track|bus)\b|coaster|toyoace|\bdyna\b|camroad|atlas|civilian|canter|\belf\b|"
+# Грузовики, автобусы и грузовые фургоны («… VAN») не берём — только легковые, минивэны, кей-кары, пикапы
+COMMERCIAL = re.compile(r"\b(truck|track|bus|van)\b|coaster|toyoace|\bdyna\b|camroad|atlas|civilian|canter|\belf\b|"
                         r"\btitan\b|condor|profia|dutro|\bquon\b|\bforward\b|\bgiga\b|super carry|fighter|\brosa\b|liesse", re.I)
 SKIP_BRANDS = {"ISUZU", "MITSUBISHI_FUSO", "HINO", "UD_TRUCKS", "NISSAN_DIESEL"}
 
