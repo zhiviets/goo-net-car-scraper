@@ -300,7 +300,9 @@ def parse_detail(html: str) -> dict:
     d["drive"] = ("полный" if re.search(r"4WD|AWD|フルタイム|パートタイム", drive) else
                   "задний" if re.search(r"\bFR\b|\bMR\b|\bRR\b", drive) else "передний" if "FF" in drive else None)
     trans = _after(lines, "ミッション") or ""
-    d["trans"] = ("вариатор" if "CVT" in trans else "механика" if "MT" in trans else "автомат" if "AT" in trans else None)
+    # «フロアMTモード付AT» — автомат с ручным режимом, а не механика: сначала CVT и AT, потом MT
+    d["trans"] = ("вариатор" if "CVT" in trans else "автомат" if re.search(r"AT|DCT|オートマ", trans)
+                  else "механика" if "MT" in trans else None)
     # Турбо: True / False / None (неизвестно) — у кей-каров по нему выбирается мощность на drom.ru
     charger = _after(lines, "過給器")
     d["turbo"] = bool(re.search(r"ターボ|スーパーチャージャー", charger)) if charger is not None else None
