@@ -89,6 +89,9 @@ MAKES = {
     "ASTON_MARTIN": "Aston Martin", "TESLA": "Tesla", "CHEVROLET": "Chevrolet", "CADILLAC": "Cadillac",
     "FORD": "Ford", "DS": "DS", "SMART": "Smart", "HYUNDAI": "Hyundai", "BYD": "BYD",
 }
+# Грузовики и автобусы не берём — только легковые, минивэны, кей-кары, пикапы
+COMMERCIAL = re.compile(r"\b(truck|track|bus)\b|coaster|toyoace|\bdyna\b|camroad|atlas|civilian|canter|\belf\b|"
+                        r"\btitan\b|condor|profia|dutro|\bquon\b|\bforward\b|\bgiga\b|super carry|fighter|\brosa\b|liesse", re.I)
 SKIP_BRANDS = {"ISUZU", "MITSUBISHI_FUSO", "HINO", "UD_TRUCKS", "NISSAN_DIESEL"}
 
 
@@ -705,7 +708,7 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
     log(f"Марок: {len(bl)} — {', '.join(bl)}")
     jobs = []
     for b in bl:
-        ms = models_of(f, b)
+        ms = [m for m in models_of(f, b) if not COMMERCIAL.search(model_name(m))]
         log(f"  {MAKES[b]}: моделей {len(ms)}")
         jobs += [(b, m) for m in ms]
     if MAX_MODELS:
@@ -877,12 +880,20 @@ def main():
         log(f"Пропущены модели, которых нет на drom.ru: {len(missing)} — "
             + ", ".join(f"{MAKES[b]} {model_name(m)}" for b, m in missing[:30]))
     drom_stats = {"power": 0, "tech": 0}
+    misses = [0]
 
     def drom_found(car):
         """Комплектация на drom.ru (один поиск на машину; повторно — из памяти)."""
         d = car.setdefault("detail", {})
         if "_drom" not in d:
-            d["_drom"] = drom.power(drom_car(car)) if drom and car.get("make") and car.get("model") else None
+            query = drom_car(car)
+            d["_drom"] = drom.power(query) if drom and car.get("make") and car.get("model") else None
+            if drom and not d["_drom"] and misses[0] < 25:
+                # Примеры промахов: что искали и какие комплектации drom.ru подошли — чтобы видеть, где не совпало
+                misses[0] += 1
+                log(f"  drom.ru не подобрал: {query['make']} {query['model']} {query['year']}, {query.get('cc')} см³, "
+                    f"{query.get('fuel')}, {query.get('drive')}, {query.get('trans')}, турбо {query.get('turbo')}, "
+                    f"«{query.get('trim')}» → {drom.last_candidates[:4] if getattr(drom, 'last_candidates', None) else 'нет групп'}")
         return d["_drom"]
 
     def resolve(car):
