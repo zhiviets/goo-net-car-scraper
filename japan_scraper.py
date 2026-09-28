@@ -89,6 +89,8 @@ MAKES = {
     "ASTON_MARTIN": "Aston Martin", "TESLA": "Tesla", "CHEVROLET": "Chevrolet", "CADILLAC": "Cadillac",
     "FORD": "Ford", "DS": "DS", "SMART": "Smart", "HYUNDAI": "Hyundai", "BYD": "BYD",
 }
+# Японские марки — на drom.ru есть в разделе «Япония»; иномарки ищем ещё и в «Европе»
+JAPANESE_MAKES = {"Toyota", "Lexus", "Nissan", "Honda", "Mazda", "Subaru", "Mitsubishi", "Suzuki", "Daihatsu", "Mitsuoka"}
 # Грузовики и автобусы не берём — только легковые, минивэны, кей-кары, пикапы
 COMMERCIAL = re.compile(r"\b(truck|track|bus)\b|coaster|toyoace|\bdyna\b|camroad|atlas|civilian|canter|\belf\b|"
                         r"\btitan\b|condor|profia|dutro|\bquon\b|\bforward\b|\bgiga\b|super carry|fighter|\brosa\b|liesse", re.I)
@@ -843,7 +845,9 @@ def drom_car(car: dict) -> dict:
     """Машина goo-net → признаки для поиска комплектации в каталоге drom.ru (рынок «Япония»)."""
     import drom_specs
     d = car.get("detail") or {}
-    return {"make": car.get("make"), "model": car.get("model"), "market": "japan",
+    # Иномарки японского рынка на drom.ru часто есть только в разделе «Европа» — ищем и там
+    markets = ["japan"] if car.get("make") in JAPANESE_MAKES else ["japan", "europe"]
+    return {"make": car.get("make"), "model": car.get("model"), "market": "japan", "markets": markets,
             "year": d.get("year") or car.get("year"), "cc": d.get("cc") or car.get("cc"),
             "fuel": drom_specs.norm_fuel(d.get("fuel")), "drive": drom_specs.norm_drive(d.get("drive")),
             "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or "",
