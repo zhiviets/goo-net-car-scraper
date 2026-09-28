@@ -277,6 +277,10 @@ def parse_detail(html: str) -> dict:
     y = _after(lines, "年式(初度登録)")
     if y and re.match(r"\d{4}", y):
         d["year"] = int(y[:4])
+        # Месяц первой регистрации — на drom.ru по нему различаются соседние периоды выпуска
+        month = re.search(r"年\s*(\d{1,2})\s*月", y)
+        if month and 1 <= int(month.group(1)) <= 12:
+            d["month"] = int(month.group(1))
     cc = _after(lines, "排気量")
     if cc and re.match(r"[\d,]+\s*cc", cc):
         d["cc"] = int(re.sub(r"\D", "", cc))
@@ -316,7 +320,8 @@ def parse_detail(html: str) -> dict:
     d["generation"] = re.sub(r"^\S+\s+", "", gen.group(1)).replace("系", " series").strip() if gen else None
     grade = re.search(r"グレード\((.+?)\)", text)
     if grade:
-        g = re.sub(r"^\S+\s+", "", grade.group(1))
+        # Первое слово — название модели по-японски («ヴェゼル …»); латинское («320i Mスポーツ») оставляем
+        g = re.sub(r"^\S*[぀-ヿ一-鿿]\S*\s+", "", grade.group(1))
         for jp, en in KATAKANA_WORDS.items():
             g = g.replace(jp, f" {en} ")
         g = " ".join(w for w in g.split() if not re.search(r"[぀-ヿ一-鿿]", w))
@@ -850,7 +855,7 @@ def drom_car(car: dict) -> dict:
     # Иномарки японского рынка на drom.ru часто есть только в разделе «Европа» — ищем и там
     markets = ["japan"] if car.get("make") in JAPANESE_MAKES else ["japan", "europe"]
     return {"make": car.get("make"), "model": car.get("model"), "market": "japan", "markets": markets,
-            "year": d.get("year") or car.get("year"), "cc": d.get("cc") or car.get("cc"),
+            "year": d.get("year") or car.get("year"), "month": d.get("month"), "cc": d.get("cc") or car.get("cc"),
             "fuel": drom_specs.norm_fuel(d.get("fuel")), "drive": drom_specs.norm_drive(d.get("drive")),
             "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or "",
             "turbo": True if "ターボ" in (car.get("card_text") or "") else d.get("turbo")}
