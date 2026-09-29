@@ -56,6 +56,8 @@ MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2010")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
 # Сколько следующих страниц (index-2.html…) дочитать у моделей с машинами 2022–2024 «до 160 л.с.»
 EXTRA_PAGES = int(os.environ.get("GOONET_EXTRA_PAGES") or "3")
+# Цена на сайте — какая по счёту снизу цена среди объявлений той же комплектации (см. market_key)
+MARKET_RANK = int(os.environ.get("GOONET_MARKET_RANK") or "4")
 # Через столько минут после старта новые порции не начинаем: GitHub обрывает прогон через
 # 6 ч (timeout 355 мин), а оборванный прогон не запускает следующий. Порция — до ~30 мин.
 RUN_MINUTES = float(os.environ.get("GOONET_RUN_MINUTES") or "300")
@@ -233,12 +235,16 @@ def parse_cards(html: str) -> list[dict]:
         cc = re.search(r"排気量\s*([\d,]+)\s*cc", text)
         img = card.select_one("img")
         src = (img.get("data-src") or img.get("src") or "") if img else ""
+        price = re.search(r"本体価格[^0-9]{0,15}([\d.,]+)\s*万円", text)
         out.append({
             "id": m.group(1),
             "url": BASE + a["href"] if a["href"].startswith("/") else a["href"],
             "year": int(year.group(1)) if year else None,
             "mileage_km": (round(float(km.group(1).replace(",", "")) * (10000 if km.group(2) else 1)) if km else None),
             "cc": int(cc.group(1).replace(",", "")) if cc else None,
+            # Цена без налога на оформление (本体価格) и полный привод — для рыночной цены комплектации
+            "price_jpy": round(float(price.group(1).replace(",", "")) * 10000) if price else None,
+            "awd": bool(re.search(r"4WD|AWD|四駆|フルタイム", text)),
             "image": src if "goo-net.com" in src else None,
             # Цена «応談» (по запросу) или без цены — на сайт такая не пройдёт, объявление не открываем
             "price_ok": "応談" not in text and not ("本体価格" in text and not re.search(r"本体価格[^0-9]{0,15}[\d.,]+\s*万円", text)),
@@ -692,6 +698,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "title": f"{car['make']} {car['model']}", "year": d.get("year") or car.get("year"),
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
         "price_value": d.get("price_jpy"), "photo_url": photo,
+        **({"market_price": car["market_price"]} if car.get("market_price") else {}),
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
         **({"options": d["options"]} if d.get("options") else {}),
         **({"tech": d["tech"]} if d.get("tech") else {}),
@@ -721,6 +728,13 @@ def push(listings: list[dict]):
 
 # ---------- прогон ----------
 
+def market_key(b: str, m: str, c: dict):
+    """Комплектация для рыночной цены: модель, год, объём (до 100 см³), полный привод или нет."""
+    if not (c.get("year") and c.get("cc")):
+        return None
+    return (b, m, c["year"], round(c["cc"] / 100), c.get("awd", False))
+
+
 def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
     """({(марка, модель): [новые машины с MIN_YEAR года]}, [машины с сайта, встреченные в обходе]) —
     первые страницы всех моделей всех марок. Машины с сайта с полной информацией не выбираются
@@ -744,6 +758,7 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
     groups, touched, shown = {}, [], [False]
     recent, pages = {}, {}   # модель → машин 2022–2024 «до 160» на первой странице; сколько страниц
     seen_ids = set()           # одно объявление может попасть на две страницы, пока список обновляется
+    market = {}                # модель, год, объём, привод → цены всех встреченных объявлений
 
     def add_page(b, m, html):
         cards = parse_cards(html or "")
@@ -758,6 +773,9 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             seen_ids.add(c["id"])
             if c.get("year") and 2022 <= c["year"] <= 2024 and guess_class(c) != "gt160":
                 recent[(b, m)] = recent.get((b, m), 0) + 1
+            c["_market"] = market_key(b, m, c)
+            if c["_market"] and c.get("price_jpy"):
+                market.setdefault(c["_market"], []).append(c["price_jpy"])
             info = known.get(c["id"])
             if info and info.get("complete"):
                 touched.append(c)
@@ -795,6 +813,14 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
                  for p in range(2, EXTRA_PAGES + 2) for b, m in order if p <= pages[(b, m)]]
         log(f"Дополнительные страницы: {len(extra)} у {len(order)} моделей с машинами 2022–2024 до 160 л.с.")
         crawl(extra, "доп. страниц")
+    # Рыночная цена комплектации — 4-я снизу (самые дешёвые — часто битые или с ошибкой в цене);
+    # объявлений меньше — самая дорогая из тех, что есть
+    ref = {k: sorted(v)[min(MARKET_RANK, len(v)) - 1] for k, v in market.items()}
+    for c in touched + [c for cars in groups.values() for c in cars]:
+        if ref.get(c.get("_market")):
+            c["market_price"] = ref[c["_market"]]
+    log(f"Рыночные цены: {len(ref)} комплектаций (модель, год, объём, привод), "
+        f"из них с {MARKET_RANK}+ объявлениями {sum(1 for v in market.values() if len(v) >= MARKET_RANK)}")
     log(f"Обход: моделей с новыми машинами {len(groups)}, новых машин {sum(map(len, groups.values()))}, "
         f"машин с сайта встречено {len(touched)}, страниц {f.count}")
     return groups, touched
@@ -909,7 +935,8 @@ def main():
     f.human = True
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
-    push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km")} for c in touched])
+    push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
+           **({"market_price": c["market_price"]} if c.get("market_price") else {})} for c in touched])
     if not total:
         return
 
