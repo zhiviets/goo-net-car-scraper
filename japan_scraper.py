@@ -486,7 +486,7 @@ def run_wants(total: int, have: dict) -> dict:
 
 
 def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take=None,
-         have: dict | None = None) -> list[dict]:
+         have: dict | None = None, known: dict | None = None) -> list[dict]:
     """Как у Кореи: по машине на модель, затем добор по кругу по моделям. Доли — 75% до 160 л.с.
     и доли лет (YEAR_BANDS) — для каталога целиком (have, см. run_wants); клетки «класс × годы»
     набираются вперемешку, чтобы и оборванный по времени прогон держал доли.
@@ -508,6 +508,16 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
     # Класс уже открытых машин модели по объёму: та же модель с тем же объёмом — тот же мотор,
     # другие такие объявления заведомо другого класса не открываем
     seen_cls = {}
+    # …и по машинам, которые уже на сайте: модель и объём те же — класс известен без открытия
+    by_name = {(MAKES.get(b), model_name(m)): (b, m) for b, m in groups}
+    for info in (known or {}).values():
+        key = by_name.get((info.get("make"), info.get("model")))
+        try:
+            cc, hp = int(float(info.get("cc") or 0)), int(info.get("power") or 0)
+        except (TypeError, ValueError):
+            continue
+        if key and cc and hp and not info.get("electric"):
+            seen_cls.setdefault((key, cc), set()).add("le160" if hp <= 160 else "gt160")
 
     def power(car, key):
         if time.time() - STARTED > RUN_MINUTES * 60:
@@ -1027,7 +1037,7 @@ def main():
         if len(buf) >= BATCH:
             flush()
 
-    cars = pick(groups, total, resolve, on_site, on_take, have)
+    cars = pick(groups, total, resolve, on_site, on_take, have, known)
     log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
                                                                          sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
