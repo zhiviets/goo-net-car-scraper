@@ -54,6 +54,8 @@ VERIFY_LIMIT = int(os.environ.get("GOONET_VERIFY") or "300")
 SHARE_160 = float(os.environ.get("GOONET_SHARE_160") or "0.75")
 MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2010")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
+# Сколько следующих страниц (index-2.html…) дочитать у моделей с машинами 2022–2024 «до 160 л.с.»
+EXTRA_PAGES = int(os.environ.get("GOONET_EXTRA_PAGES") or "3")
 # Через столько минут после старта новые порции не начинаем: GitHub обрывает прогон через
 # 6 ч (timeout 355 мин), а оборванный прогон не запускает следующий. Порция — до ~30 мин.
 RUN_MINUTES = float(os.environ.get("GOONET_RUN_MINUTES") or "300")
@@ -729,36 +731,60 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             by_brand.setdefault(b, []).append((b, m))
         jobs = [x for group in zip(*[v[:MAX_MODELS] for v in by_brand.values()]) for x in group][:MAX_MODELS]
         log(f"Проверка: только {len(jobs)} моделей")
-    groups, touched, shown = {}, [], False
-    with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(f.get, f"{BASE}/usedcar/brand-{b}/car-{m}/"): (b, m) for b, m in jobs}
-        for n, fut in enumerate(as_completed(futures), 1):
-            b, m = futures[fut]
-            cards = parse_cards(fut.result() or "")
-            if cards and not shown:
-                log(f"Пример карточки: {cards[0]}")
-                shown = True
-            for c in cards:
-                info = known.get(c["id"])
-                if info and info.get("complete"):
-                    touched.append(c)
-                    continue
-                if info and info.get("year"):
-                    c["year"] = c.get("year") or int(info["year"])
-                if (c["year"] and c["year"] < MIN_YEAR) or not c.get("price_ok", True):
-                    continue
-                c.update(make=MAKES[b], model=model_name(m))
-                if info and info.get("hp"):
-                    hp = int(re.sub(r"\D", "", str(info["hp"])) or 0)
-                    c["power"] = "le160" if 0 < hp <= 160 else "gt160" if hp else None
-                groups.setdefault((b, m), []).append(c)
-            if n % 100 == 0:
-                log(f"  моделей просмотрено {n}/{len(jobs)}, с машинами {len(groups)}, {(time.time() - started) / 60:.0f} мин")
-            if time.time() > deadline:
-                log(f"Время обхода вышло: просмотрено {n} из {len(jobs)}")
-                for x in futures:
-                    x.cancel()
-                break
+    groups, touched, shown = {}, [], [False]
+    recent, pages = {}, {}   # модель → машин 2022–2024 «до 160» на первой странице; сколько страниц
+    seen_ids = set()           # одно объявление может попасть на две страницы, пока список обновляется
+
+    def add_page(b, m, html):
+        cards = parse_cards(html or "")
+        if cards and not shown[0]:
+            log(f"Пример карточки: {cards[0]}")
+            shown[0] = True
+        more = [int(x) for x in re.findall(rf"car-{re.escape(m)}/index-(\d+)\.html", html or "")]
+        pages[(b, m)] = max(more + [pages.get((b, m), 1)])
+        for c in cards:
+            if c["id"] in seen_ids:
+                continue
+            seen_ids.add(c["id"])
+            if c.get("year") and 2022 <= c["year"] <= 2024 and guess_class(c) != "gt160":
+                recent[(b, m)] = recent.get((b, m), 0) + 1
+            info = known.get(c["id"])
+            if info and info.get("complete"):
+                touched.append(c)
+                continue
+            if info and info.get("year"):
+                c["year"] = c.get("year") or int(info["year"])
+            if (c["year"] and c["year"] < MIN_YEAR) or not c.get("price_ok", True):
+                continue
+            c.update(make=MAKES[b], model=model_name(m))
+            if info and info.get("hp"):
+                hp = int(re.sub(r"\D", "", str(info["hp"])) or 0)
+                c["power"] = "le160" if 0 < hp <= 160 else "gt160" if hp else None
+            groups.setdefault((b, m), []).append(c)
+
+    def crawl(urls, label):
+        """urls — [(марка, модель, адрес)]; до конца времени обхода."""
+        with ThreadPoolExecutor(WORKERS) as pool:
+            futures = {pool.submit(f.get, url): (b, m) for b, m, url in urls}
+            for n, fut in enumerate(as_completed(futures), 1):
+                add_page(*futures[fut], fut.result())
+                if n % 100 == 0:
+                    log(f"  {label}: {n}/{len(urls)}, моделей с машинами {len(groups)}, {(time.time() - started) / 60:.0f} мин")
+                if time.time() > deadline:
+                    log(f"Время обхода вышло: {label} — {n} из {len(urls)}")
+                    for x in futures:
+                        x.cancel()
+                    return False
+        return True
+
+    if crawl([(b, m, f"{BASE}/usedcar/brand-{b}/car-{m}/") for b, m in jobs], "моделей просмотрено") and EXTRA_PAGES:
+        # Первые страницы машин 2022–2024 «до 160 л.с.» почти все уже на сайте — у моделей, где
+        # таких много, дочитываем следующие страницы (index-2.html…), пока есть время обхода
+        order = sorted((k for k in recent if pages.get(k, 1) > 1), key=lambda k: -recent[k])
+        extra = [(b, m, f"{BASE}/usedcar/brand-{b}/car-{m}/index-{p}.html")
+                 for p in range(2, EXTRA_PAGES + 2) for b, m in order if p <= pages[(b, m)]]
+        log(f"Дополнительные страницы: {len(extra)} у {len(order)} моделей с машинами 2022–2024 до 160 л.с.")
+        crawl(extra, "доп. страниц")
     log(f"Обход: моделей с новыми машинами {len(groups)}, новых машин {sum(map(len, groups.values()))}, "
         f"машин с сайта встречено {len(touched)}, страниц {f.count}")
     return groups, touched
