@@ -619,7 +619,9 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             nxt = next(more, None)
             if nxt is None:
                 break
-            if want.get((kind, year_band(nxt[0]["year"]))):
+            # только годы, которых каталогу ещё не хватает, и не больше нужного по этим годам
+            cell = (kind, year_band(nxt[0]["year"]))
+            if count.get(cell, 0) < want.get(cell, 0):
                 take(*nxt)
     years = {name: sum(v for (_, b), v in count.items() if b == name) for name, *_ in YEAR_BANDS}
     log(f"Выбрано: новых моделей {covered} (на сайте нет {sum(1 for k in groups if not on_site.get(k))} из {len(groups)}), машин {len(picked)} — до 160 л.с. {total_of('le160')}, "

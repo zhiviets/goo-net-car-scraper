@@ -3,7 +3,11 @@ name: Goo-net probe
 # Разовая проверка подбора мощности с drom.ru на настоящих объявлениях goo-net
 # (см. probe.py). Ничего никуда не отправляет.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Какой скрипт проверки запустить"
+        default: "probe.py"
 
 jobs:
   probe:
@@ -29,4 +33,5 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUNBUFFERED: "1"
-        run: python probe.py
+          SCRIPT: ${{ inputs.script || 'probe.py' }}
+        run: python "$SCRIPT"
