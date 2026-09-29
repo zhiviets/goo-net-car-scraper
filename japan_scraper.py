@@ -56,8 +56,8 @@ MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2010")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
 # Сколько следующих страниц (index-2.html…) дочитать у моделей с машинами 2022–2024 «до 160 л.с.»
 EXTRA_PAGES = int(os.environ.get("GOONET_EXTRA_PAGES") or "3")
-# Цена на сайте — какая по счёту снизу цена среди объявлений той же комплектации (см. market_key)
-MARKET_RANK = int(os.environ.get("GOONET_MARKET_RANK") or "4")
+# Шкала цены на сайте — если похожих объявлений (см. market_key) не меньше стольких
+MIN_SIMILAR = 4
 # Через столько минут после старта новые порции не начинаем: GitHub обрывает прогон через
 # 6 ч (timeout 355 мин), а оборванный прогон не запускает следующий. Порция — до ~30 мин.
 RUN_MINUTES = float(os.environ.get("GOONET_RUN_MINUTES") or "300")
@@ -698,7 +698,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "title": f"{car['make']} {car['model']}", "year": d.get("year") or car.get("year"),
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
         "price_value": d.get("price_jpy"), "photo_url": photo,
-        **({"market_price": car["market_price"]} if car.get("market_price") else {}),
+        **({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
         **({"options": d["options"]} if d.get("options") else {}),
         **({"tech": d["tech"]} if d.get("tech") else {}),
@@ -727,6 +727,14 @@ def push(listings: list[dict]):
 
 
 # ---------- прогон ----------
+
+def price_stats(prices: list) -> dict:
+    """{n, lo, mid, hi}: от 10 цен — 10-й и 90-й процентили, иначе самая низкая и самая высокая."""
+    p = sorted(prices)
+    at = lambda q: p[round((len(p) - 1) * q)]
+    wide = len(p) >= 10
+    return {"n": len(p), "lo": at(0.1) if wide else p[0], "mid": at(0.5), "hi": at(0.9) if wide else p[-1]}
+
 
 def market_key(b: str, m: str, c: dict):
     """Комплектация для рыночной цены: модель, год, объём (до 100 см³), полный привод или нет."""
@@ -813,14 +821,14 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
                  for p in range(2, EXTRA_PAGES + 2) for b, m in order if p <= pages[(b, m)]]
         log(f"Дополнительные страницы: {len(extra)} у {len(order)} моделей с машинами 2022–2024 до 160 л.с.")
         crawl(extra, "доп. страниц")
-    # Рыночная цена комплектации — 4-я снизу (самые дешёвые — часто битые или с ошибкой в цене);
-    # объявлений меньше — самая дорогая из тех, что есть
-    ref = {k: sorted(v)[min(MARKET_RANK, len(v)) - 1] for k, v in market.items()}
+    # Цены похожих объявлений (модель, год, объём, привод) — для шкалы «дёшево — дорого» на сайте:
+    # от 10 объявлений — без крайних 10% с каждой стороны (битые, с ошибкой в цене)
+    stats = {k: price_stats(v) for k, v in market.items() if len(v) >= MIN_SIMILAR}
     for c in touched + [c for cars in groups.values() for c in cars]:
-        if ref.get(c.get("_market")):
-            c["market_price"] = ref[c["_market"]]
-    log(f"Рыночные цены: {len(ref)} комплектаций (модель, год, объём, привод), "
-        f"из них с {MARKET_RANK}+ объявлениями {sum(1 for v in market.values() if len(v) >= MARKET_RANK)}")
+        if stats.get(c.get("_market")):
+            c["price_stats"] = stats[c["_market"]]
+    log(f"Статистика цен: {len(stats)} комплектаций (модель, год, объём, привод) с {MIN_SIMILAR}+ объявлениями "
+        f"из {len(market)}")
     log(f"Обход: моделей с новыми машинами {len(groups)}, новых машин {sum(map(len, groups.values()))}, "
         f"машин с сайта встречено {len(touched)}, страниц {f.count}")
     return groups, touched
@@ -936,7 +944,7 @@ def main():
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
-           **({"market_price": c["market_price"]} if c.get("market_price") else {})} for c in touched])
+           **({"price_stats": c["price_stats"]} if c.get("price_stats") else {})} for c in touched])
     if not total:
         return
 
