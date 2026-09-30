@@ -773,9 +773,13 @@ def auction_price(car: dict, lots: list[dict]) -> dict | None:
     if len(pick) < MIN_SIMILAR:
         return None
     stats = price_stats([x["price_jpy"] for x in pick])
-    rank = car.get("price_rank", 0.5)
-    price = stats["lo"] + (stats["hi"] - stats["lo"]) * min(1, max(0, rank))
-    return {**stats, "price": round(price / 1000) * 1000}
+    rank = min(1, max(0, car.get("price_rank", 0.5)))
+    # Как шкала на сайте: середина объявлений goo-net → средняя цена аукциона, дешёвая половина — между
+    # самой низкой и средней, дорогая — между средней и самой высокой (по прямой от низкой до высокой
+    # машина из середины получала не среднюю цену, если продажи сбиты к одному краю)
+    lo, mid, hi = stats["lo"], stats["mid"], stats["hi"]
+    price = lo + (mid - lo) * rank * 2 if rank <= 0.5 else mid + (hi - mid) * (rank - 0.5) * 2
+    return {**stats, "price": min(hi, max(lo, round(price / 1000) * 1000))}
 
 
 def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
