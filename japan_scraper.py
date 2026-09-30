@@ -699,6 +699,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
         "price_value": d.get("price_jpy"), "photo_url": photo,
         **({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
+        **({"auction": car["auction"]} if car.get("auction") else {}),
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
         **({"options": d["options"]} if d.get("options") else {}),
         **({"tech": d["tech"]} if d.get("tech") else {}),
@@ -734,6 +735,54 @@ def price_stats(prices: list) -> dict:
     at = lambda q: p[round((len(p) - 1) * q)]
     wide = len(p) >= 10
     return {"n": len(p), "lo": at(0.1) if wide else p[0], "mid": at(0.5), "hi": at(0.9) if wide else p[-1]}
+
+
+AUCTION_PAGES = int(os.environ.get("GOONET_AUCTION_PAGES") or "250")
+_SCORE = re.compile(r"^\d(?:\.\d)?$")
+
+
+def auction_price(car: dict, lots: list[dict]) -> dict | None:
+    """Цена «как на аукционе»: продажи той же модели и года с тем же объёмом (±100 см³) и приводом
+    (без привода, если таких мало), только с цифровой оценкой (битые «R» не берём). Цена — с того же
+    места среди продаж, что у машины среди объявлений goo-net (price_rank; нет — середина).
+    → {price, n, lo, mid, hi} или None (продаж меньше MIN_SIMILAR)."""
+    cc = car.get("cc")
+    fit = [x for x in lots if x.get("price_jpy") and _SCORE.match(str(x.get("score") or ""))
+           and (not cc or not x.get("cc") or abs(x["cc"] - cc) <= 100)]
+    same_drive = [x for x in fit if ("4WD" in (x.get("grade") or "").upper()) == bool(car.get("awd"))]
+    pick = same_drive if len(same_drive) >= MIN_SIMILAR else fit
+    if len(pick) < MIN_SIMILAR:
+        return None
+    stats = price_stats([x["price_jpy"] for x in pick])
+    rank = car.get("price_rank", 0.5)
+    price = stats["lo"] + (stats["hi"] - stats["lo"]) * min(1, max(0, rank))
+    return {**stats, "price": round(price / 1000) * 1000}
+
+
+def attach_auctions(cars: list[dict], drom) -> None:
+    """Машинам — цена «как на аукционе» по статистике японских аукционов drom.ru. Страниц drom.ru —
+    не больше AUCTION_PAGES за прогон: сначала модели и годы, где машин больше (кэш — неделя)."""
+    if not drom:
+        return
+    need = {}
+    for c in cars:
+        if c.get("_bm") and c.get("year"):
+            need.setdefault((c["_bm"], c["year"]), []).append(c)
+    start, done, lots_n = drom.requests, 0, 0
+    for (bm, year), group in sorted(need.items(), key=lambda kv: -len(kv[1])):
+        if drom.requests - start >= AUCTION_PAGES:
+            break
+        lots = drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), year)
+        if not lots:
+            continue
+        lots_n += len(lots)
+        for c in group:
+            a = auction_price(c, lots)
+            if a:
+                c["auction"] = a
+                done += 1
+    log(f"Аукционы drom.ru: цена «как на аукционе» у {done} из {len(cars)} машин "
+        f"(моделей и лет {len(need)}, лотов {lots_n}, страниц drom.ru {drom.requests - start})")
 
 
 def market_key(b: str, m: str, c: dict):
@@ -782,6 +831,7 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             if c.get("year") and 2022 <= c["year"] <= 2024 and guess_class(c) != "gt160":
                 recent[(b, m)] = recent.get((b, m), 0) + 1
             c["_market"] = market_key(b, m, c)
+            c["_bm"] = (b, m)
             if c["_market"] and c.get("price_jpy"):
                 market.setdefault(c["_market"], []).append(c["price_jpy"])
             info = known.get(c["id"])
@@ -824,6 +874,14 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
     # Цены похожих объявлений (модель, год, объём, привод) — для шкалы «дёшево — дорого» на сайте:
     # от 10 объявлений — без крайних 10% с каждой стороны (битые, с ошибкой в цене)
     stats = {k: price_stats(v) for k, v in market.items() if len(v) >= MIN_SIMILAR}
+    # Место машины среди объявлений goo-net своей группы (0 — самая дешёвая, 1 — самая дорогая) —
+    # на это же место встанет её цена среди продаж японских аукционов
+    for c in touched + [c for cars in groups.values() for c in cars]:
+        prices = market.get(c.get("_market")) or []
+        if len(prices) >= MIN_SIMILAR and c.get("price_jpy"):
+            below = sum(1 for p in prices if p < c["price_jpy"])
+            same = sum(1 for p in prices if p == c["price_jpy"])
+            c["price_rank"] = (below + (same - 1) / 2) / (len(prices) - 1)
     for c in touched + [c for cars in groups.values() for c in cars]:
         if stats.get(c.get("_market")):
             c["price_stats"] = stats[c["_market"]]
@@ -942,11 +1000,13 @@ def main():
     groups, touched = scan(f, known)
     f.human = True
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
+    drom, close_drom = open_drom()
+    # Цена «как на аукционе» — машинам с сайта и новым (статистика продаж японских аукционов drom.ru)
+    attach_auctions(touched + [c for cars in groups.values() for c in cars], drom)
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
-           **({"price_stats": c["price_stats"]} if c.get("price_stats") else {})} for c in touched])
-    if not total:
-        return
+           **({"price_stats": c["price_stats"]} if c.get("price_stats") else {}),
+           **({"auction": c["auction"]} if c.get("auction") else {})} for c in touched])
 
     opened = {}
 
@@ -954,7 +1014,6 @@ def main():
         opened[why] = opened.get(why, 0) + 1
         return None
 
-    drom, close_drom = open_drom() if total else (None, lambda: None)
     if drom:
         # Моделей, которых нет на drom.ru (грузовики, автобусы — их нет в каталоге легковых), не берём:
         # у двух третей объявлений goo-net мощности нет, а взять её, кроме drom.ru, негде
