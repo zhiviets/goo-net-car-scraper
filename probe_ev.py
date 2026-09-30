@@ -24,12 +24,16 @@ def main():
                 if any(w in ln.lower() for w in ("электр", "запас хода", "батаре", "зарядк", "30-минут", "мощност")):
                     print(f"   {ln!r} → {lines[i + 1] if i + 1 < len(lines) else ''!r}")
             print("   parse_trim:", json.dumps(drom_specs.parse_trim(got[1]), ensure_ascii=False))
-        q = {"make": "BYD", "model": "Song PLUS", "market": "china", "year": 2023, "cc": None, "fuel": "electric",
-             "drive": None, "trans": None, "trim": "EV 605KM"}
-        found = drom.power(q)
-        print("\npower():", {k: v for k, v in (found or {}).items() if k != "trim"}, (found or {}).get("trim", {}).get("name"))
-        if found:
-            print("tech():", json.dumps(drom.tech(found.get("trim")), ensure_ascii=False)[:1500])
+        for hp, trim in ((218, "EV 605KM 87 kWh"), (None, "EV 605KM"), (181, "EV 520KM 71.8 kWh")):
+            q = {"make": "BYD", "model": "Song PLUS", "market": "china", "year": 2023, "cc": None, "fuel": "electric",
+                 "drive": None, "trans": None, "trim": trim, "hp": hp}
+            found = drom.power(q)
+            print(f"\npower(hp={hp}, trim={trim!r}):", {k: v for k, v in (found or {}).items() if k != "trim"},
+                  (found or {}).get("trim"))
+            print("  кандидаты:", drom.last_candidates[:6])
+            if found:
+                t = drom.tech(found.get("trim"))
+                print("  tech Электро:", [g for g in (t or {}).get("groups", []) if g[0] == "Электро"])
         print("страниц drom.ru:", drom.requests)
     finally:
         close()
