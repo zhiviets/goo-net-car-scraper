@@ -778,20 +778,24 @@ def auction_price(car: dict, lots: list[dict]) -> dict | None:
     return {**stats, "price": round(price / 1000) * 1000}
 
 
-def attach_auctions(cars: list[dict], drom) -> None:
-    """Машинам — цена «как на аукционе» по статистике японских аукционов drom.ru. Страниц drom.ru —
-    не больше AUCTION_PAGES за прогон: сначала модели и годы, где машин больше (кэш — неделя)."""
+def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
+    """Машинам — цена «как на аукционе» по статистике японских аукционов drom.ru. Новых страниц drom.ru —
+    не больше AUCTION_PAGES за прогон: сначала модели и годы машин, уже стоящих на сайте (on_site — их номера),
+    затем где машин больше. Когда лимит кончился, остальным — только то, что уже в кэше (кэш — неделя)."""
     if not drom:
         return
     need = {}
     for c in cars:
         if c.get("_bm") and c.get("year"):
             need.setdefault((c["_bm"], c["year"]), []).append(c)
-    start, done, lots_n = drom.requests, 0, 0
-    for (bm, year), group in sorted(need.items(), key=lambda kv: -len(kv[1])):
+    order = sorted(need.items(), key=lambda kv: (-sum(c["id"] in on_site for c in kv[1]), -len(kv[1])))
+    start, done, lots_n, site_done = drom.requests, 0, 0, 0
+    for (bm, year), group in order:
         if drom.requests - start >= AUCTION_PAGES:
-            break
-        lots = drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), year)
+            with drom.cached_only():
+                lots = drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), year)
+        else:
+            lots = drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), year)
         if not lots:
             continue
         lots_n += len(lots)
@@ -800,7 +804,9 @@ def attach_auctions(cars: list[dict], drom) -> None:
             if a:
                 c["auction"] = a
                 done += 1
-    log(f"Аукционы drom.ru: цена «как на аукционе» у {done} из {len(cars)} машин "
+                site_done += c["id"] in on_site
+    log(f"Аукционы drom.ru: цена «как на аукционе» у {done} из {len(cars)} машин, из них на сайте {site_done} "
+        f"из {sum(c['id'] in on_site for c in cars)} "
         f"(моделей и лет {len(need)}, лотов {lots_n}, страниц drom.ru {drom.requests - start})")
 
 
@@ -1021,7 +1027,7 @@ def main():
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
     drom, close_drom = open_drom()
     # Цена «как на аукционе» — машинам с сайта и новым (статистика продаж японских аукционов drom.ru)
-    attach_auctions(touched + [c for cars in groups.values() for c in cars], drom)
+    attach_auctions(touched + [c for cars in groups.values() for c in cars], drom, {c["id"] for c in touched})
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
            **({"price_stats": c["price_stats"]} if c.get("price_stats") else {}),
