@@ -1013,7 +1013,10 @@ def drom_car(car: dict) -> dict:
             "year": d.get("year") or car.get("year"), "month": d.get("month"), "cc": d.get("cc") or car.get("cc"),
             "fuel": drom_specs.norm_fuel(d.get("fuel")), "drive": drom_specs.norm_drive(d.get("drive")),
             "trans": drom_specs.norm_trans(d.get("trans")), "trim": d.get("grade") or "",
-            "turbo": True if "ターボ" in (car.get("card_text") or "") else d.get("turbo")}
+            "turbo": True if "ターボ" in (car.get("card_text") or "") else d.get("turbo"),
+            # Мощность из объявления goo-net — подсказка выбора комплектации (у электромобиля от неё
+            # зависит, чья 30-минутная мощность попадёт в расчёт утильсбора)
+            "hp": d.get("hp")}
 
 
 def main():
