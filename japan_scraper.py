@@ -1007,6 +1007,35 @@ def open_drom():
     return drom, close
 
 
+TECH_FIX_LIMIT = int(os.environ.get("GOONET_TECH_FIX") or "100")
+_tech_fixed = [0, 0]   # искали, нашли
+
+
+def tech_for_site_car(c: dict, known: dict, drom) -> dict:
+    """Гибриду или электромобилю с сайта без 30-минутной мощности (у него цена «от») — характеристики
+    комплектации drom.ru: 30-минутная мощность электромотора и комбинированная мощность гибрида.
+    Тип двигателя и мощность — как их знает сайт. Не больше TECH_FIX_LIMIT машин за прогон. → {"tech"} или {}."""
+    info = known.get(c["id"]) or {}
+    if not (drom and info.get("needs30")) or _tech_fixed[0] >= TECH_FIX_LIMIT or not c.get("_bm"):
+        return {}
+    _tech_fixed[0] += 1
+    kind = info.get("engine_type") or ""
+    fuel = "электро" if kind in ("electric", "sequential_hybrid") else "гибрид"
+    try:
+        hp = int(re.sub(r"\D", "", str(info.get("hp") or "")) or 0) or None
+    except ValueError:
+        hp = None
+    car = {**c, "make": MAKES[c["_bm"][0]], "model": model_name(c["_bm"][1]),
+           "detail": {"fuel": fuel, "hp": hp, "year": c.get("year"), "cc": c.get("cc")}}
+    found = drom.power(drom_car(car))
+    tech = drom.tech(found.get("trim")) if found else None
+    has30 = tech and any(r[0] == "30-минутная мощность" for g in tech.get("groups", []) for r in g[1])
+    if not has30:
+        return {}
+    _tech_fixed[1] += 1
+    return {"tech": tech}
+
+
 def drom_car(car: dict) -> dict:
     """Машина goo-net → признаки для поиска комплектации в каталоге drom.ru (рынок «Япония»)."""
     import drom_specs
@@ -1035,10 +1064,14 @@ def main():
     drom, close_drom = open_drom()
     # Цена «как на аукционе» — машинам с сайта и новым (статистика продаж японских аукционов drom.ru)
     attach_auctions(touched + [c for cars in groups.values() for c in cars], drom, {c["id"] for c in touched})
-    # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе
+    # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе (гибридам и электромобилям без
+    # 30-минутной мощности — ещё и характеристики комплектации drom.ru с ней)
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
            **({"price_stats": c["price_stats"]} if c.get("price_stats") else {}),
-           **({"auction": c["auction"]} if c.get("auction") else {})} for c in touched])
+           **({"auction": c["auction"]} if c.get("auction") else {}),
+           **tech_for_site_car(c, known, drom)} for c in touched])
+    log(f"Характеристики drom.ru с 30-минутной мощностью досланы машинам с сайта: {_tech_fixed[1]} "
+        f"(искали у {_tech_fixed[0]})")
 
     opened = {}
 
