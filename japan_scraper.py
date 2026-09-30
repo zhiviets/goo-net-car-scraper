@@ -706,6 +706,26 @@ def to_listing(car: dict, f: Fetcher) -> dict:
     }
 
 
+def post_batch(batch: list[dict]) -> httpx.Response:
+    """Пачка на сайт. Сайт иногда отвечает не вовремя (перезапуск, нагрузка) — тогда ещё три попытки
+    с паузами: импорт обновляет машины по номеру объявления, повтор ничего не задвоит."""
+    for attempt, pause in enumerate((15, 45, 90, None), 1):
+        try:
+            resp = httpx.post(f"{BN_AUTO_URL}/api/live-listings/import", json={"source": "goonet", "listings": batch},
+                              headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=90)
+            if resp.status_code < 500 and resp.status_code != 429:
+                return resp
+            problem = f"HTTP {resp.status_code}"
+        except httpx.TransportError as error:
+            if pause is None:
+                raise
+            problem = type(error).__name__
+        if pause is None:
+            return resp
+        log(f"  сайт не принял пачку ({problem}), попытка {attempt} из 4 — повтор через {pause} с")
+        time.sleep(pause)
+
+
 def push(listings: list[dict]):
     if not listings:
         return
@@ -715,8 +735,7 @@ def push(listings: list[dict]):
     light = [x for x in listings if "spec" not in x]
     full = [x for x in listings if "spec" in x]
     for batch in [light[i:i + 200] for i in range(0, len(light), 200)] + [full[i:i + 10] for i in range(0, len(full), 10)]:
-        resp = httpx.post(f"{BN_AUTO_URL}/api/live-listings/import", json={"source": "goonet", "listings": batch},
-                          headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=90)
+        resp = post_batch(batch)
         try:
             data = resp.json()
         except ValueError:
