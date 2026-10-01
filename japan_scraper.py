@@ -40,6 +40,11 @@ TOTAL = int(os.environ.get("GOONET_TOTAL") or "0")
 # два раза в неделю (UPDATE_DAYS, 0 — понедельник, первый прогон дня): до UPDATE_NEW новых
 # порциями по UPDATE_BATCH с паузой UPDATE_PAUSE минут; в остальное время прогон сразу заканчивается.
 FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "5500")
+# Между обновлениями прогон не добавляет новых машин, а исправляет машины сайта: неполные (с ошибками)
+# и без шкалы цены — обход goo-net ради цен похожих объявлений, аукционы drom.ru, повторное открытие
+REPAIR = False
+REPAIR_VERIFY = int(os.environ.get("GOONET_REPAIR_VERIFY") or "800")
+REPAIR_DROM_PAGES = int(os.environ.get("GOONET_REPAIR_DROM_PAGES") or "450")
 FILL_PER_RUN = int(os.environ.get("GOONET_FILL_PER_RUN") or "1000")
 UPDATE_DAYS = {int(d) for d in (os.environ.get("GOONET_UPDATE_DAYS") or "2,5").split(",") if d.strip()}
 UPDATE_NEW = int(os.environ.get("GOONET_UPDATE_NEW") or "600")
@@ -56,7 +61,7 @@ MIN_YEAR = int(os.environ.get("GOONET_MIN_YEAR") or "2010")
 SCAN_MINUTES = float(os.environ.get("GOONET_SCAN_MINUTES") or "90")
 # Сколько следующих страниц (index-2.html…) дочитать у моделей с машинами 2022–2024 «до 160 л.с.»
 EXTRA_PAGES = int(os.environ.get("GOONET_EXTRA_PAGES") or "3")
-# Шкала цены на сайте — если похожих объявлений (см. market_key) не меньше стольких
+# Шкала цены на сайте — если похожих объявлений (см. Market) не меньше стольких
 MIN_SIMILAR = 4
 # Через столько минут после старта новые порции не начинаем: GitHub обрывает прогон через
 # 6 ч (timeout 355 мин), а оборванный прогон не запускает следующий. Порция — до ~30 мин.
@@ -763,15 +768,16 @@ _SCORE = re.compile(r"^(?:\d(?:\.\d)?|S|R|RA)$", re.I)
 
 def auction_price(car: dict, lots: list[dict]) -> dict | None:
     """Цена «как на аукционе»: продажи той же модели и года с тем же объёмом (±100 см³) и приводом
-    (без привода, если таких мало), с аукционной оценкой — и цифровой, и R / RA (после ремонта). Цена — с того же
+    (без привода, если таких мало; потом любой объём), с аукционной оценкой — и цифровой, и R / RA (после ремонта). Цена — с того же
     места среди продаж, что у машины среди объявлений goo-net (price_rank; нет — середина).
     → {price, n, lo, mid, hi} или None (продаж меньше MIN_SIMILAR)."""
     cc = car.get("cc")
-    fit = [x for x in lots if x.get("price_jpy") and _SCORE.match(str(x.get("score") or ""))
-           and (not cc or not x.get("cc") or abs(x["cc"] - cc) <= 100)]
+    scored = [x for x in lots if x.get("price_jpy") and _SCORE.match(str(x.get("score") or ""))]
+    fit = [x for x in scored if not cc or not x.get("cc") or abs(x["cc"] - cc) <= 100]
     same_drive = [x for x in fit if ("4WD" in (x.get("grade") or "").upper()) == bool(car.get("awd"))]
-    pick = same_drive if len(same_drive) >= MIN_SIMILAR else fit
-    if len(pick) < MIN_SIMILAR:
+    # Похожих продаж мало — шире: любой привод, потом любой объём (шкала нужна каждой машине)
+    pick = next((p for p in (same_drive, fit, scored) if len(p) >= MIN_SIMILAR), None)
+    if not pick:
         return None
     stats = price_stats([x["price_jpy"] for x in pick])
     rank = min(1, max(0, car.get("price_rank", 0.5)))
@@ -810,16 +816,82 @@ def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
                 c["auction"] = a
                 done += 1
                 site_done += c["id"] in on_site
+    # Машинам с сайта, которым продаж своего года не хватило, — продажи соседних годов (год ±1)
+    near = 0
+    for (bm, year), group in order:
+        lack = [c for c in group if c["id"] in on_site and not c.get("auction")]
+        if not lack:
+            continue
+        lots = []
+        for y in (year, year - 1, year + 1):
+            if drom.requests - start >= AUCTION_PAGES:
+                with drom.cached_only():
+                    lots += drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), y) or []
+            else:
+                lots += drom.auction_lots(MAKES[bm[0]], model_name(bm[1]), y) or []
+        for c in lack:
+            a = auction_price(c, lots)
+            if a:
+                c["auction"] = a
+                done += 1
+                site_done += 1
+                near += 1
     log(f"Аукционы drom.ru: цена «как на аукционе» у {done} из {len(cars)} машин, из них на сайте {site_done} "
-        f"из {sum(c['id'] in on_site for c in cars)} "
+        f"из {sum(c['id'] in on_site for c in cars)}, по соседним годам {near} "
         f"(моделей и лет {len(need)}, лотов {lots_n}, страниц drom.ru {drom.requests - start})")
 
 
-def market_key(b: str, m: str, c: dict):
-    """Комплектация для рыночной цены: модель, год, объём (до 100 см³), полный привод или нет."""
-    if not (c.get("year") and c.get("cc")):
-        return None
-    return (b, m, c["year"], round(c["cc"] / 100), c.get("awd", False))
+class Market:
+    """Цены объявлений goo-net для шкалы «дёшево — дорого». Похожие — сначала та же комплектация
+    (модель, год, объём до 100 см³, привод); если таких меньше MIN_SIMILAR — шире: любой привод,
+    соседние годы, любой объём — чтобы шкала была у каждой машины."""
+
+    def __init__(self):
+        self.index = {}
+
+    def add(self, b: str, m: str, c: dict):
+        if not (c.get("year") and c.get("price_jpy")):
+            return
+        y, cc, awd = c["year"], round(c["cc"] / 100) if c.get("cc") else None, bool(c.get("awd"))
+        keys = [("y", b, m, y)] + ([("e", b, m, y, cc, awd), ("c", b, m, y, cc)] if cc else [])
+        for k in keys:
+            self.index.setdefault(k, []).append(c["price_jpy"])
+
+    def prices(self, b: str, m: str, year, cc=None, awd=False) -> tuple[str, list]:
+        """(насколько похожие, цены) — первая группа с MIN_SIMILAR+ объявлениями; нет такой — ("", [])."""
+        if not year:
+            return "", []
+        cc = round(cc / 100) if cc else None
+        same_cc = lambda years: [("c", b, m, year + d, cc) for d in years] if cc else []
+        levels = [("комплектация", [("e", b, m, year, cc, bool(awd))] if cc else []),
+                  ("любой привод", same_cc([0])),
+                  ("соседние годы", same_cc([-1, 0, 1])),
+                  ("любой объём", [("y", b, m, year)]),
+                  ("любой объём, соседние годы", [("y", b, m, year + d) for d in (-1, 0, 1)]),
+                  ("±2 года", same_cc(range(-2, 3))),
+                  ("любой объём, ±2 года", [("y", b, m, year + d) for d in range(-2, 3)])]
+        for name, keys in levels:
+            p = [x for k in keys for x in self.index.get(k, [])]
+            if len(p) >= MIN_SIMILAR:
+                return name, p
+        return "", []
+
+    def attach(self, c: dict, b: str, m: str, levels: dict | None = None):
+        """Машине — статистика цен похожих (price_stats) и её место среди них (price_rank)."""
+        name, prices = self.prices(b, m, c.get("year"), c.get("cc"), c.get("awd"))
+        if levels is not None:
+            levels[name or "нет"] = levels.get(name or "нет", 0) + 1
+        if not prices:
+            return
+        c["price_stats"] = price_stats(prices)
+        if c.get("price_jpy"):
+            below = sum(1 for p in prices if p < c["price_jpy"])
+            same = sum(1 for p in prices if p == c["price_jpy"])
+            c["price_rank"] = min(1, max(0, (below + (same - 1) / 2) / (len(prices) - 1)))
+
+
+MARKET = Market()
+NAME_TO_BM = {}     # (марка, модель) как на сайте → (slug марки, slug модели) goo-net
 
 
 def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
@@ -845,7 +917,6 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
     groups, touched, shown = {}, [], [False]
     recent, pages = {}, {}   # модель → машин 2022–2024 «до 160» на первой странице; сколько страниц
     seen_ids = set()           # одно объявление может попасть на две страницы, пока список обновляется
-    market = {}                # модель, год, объём, привод → цены всех встреченных объявлений
 
     def add_page(b, m, html):
         cards = parse_cards(html or "")
@@ -860,10 +931,9 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             seen_ids.add(c["id"])
             if c.get("year") and 2022 <= c["year"] <= 2024 and guess_class(c) != "gt160":
                 recent[(b, m)] = recent.get((b, m), 0) + 1
-            c["_market"] = market_key(b, m, c)
             c["_bm"] = (b, m)
-            if c["_market"] and c.get("price_jpy"):
-                market.setdefault(c["_market"], []).append(c["price_jpy"])
+            NAME_TO_BM[(MAKES[b], model_name(m))] = (b, m)
+            MARKET.add(b, m, c)
             info = known.get(c["id"])
             if info and info.get("complete"):
                 touched.append(c)
@@ -901,22 +971,13 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
                  for p in range(2, EXTRA_PAGES + 2) for b, m in order if p <= pages[(b, m)]]
         log(f"Дополнительные страницы: {len(extra)} у {len(order)} моделей с машинами 2022–2024 до 160 л.с.")
         crawl(extra, "доп. страниц")
-    # Цены похожих объявлений (модель, год, объём, привод) — для шкалы «дёшево — дорого» на сайте:
-    # от 10 объявлений — без крайних 10% с каждой стороны (битые, с ошибкой в цене)
-    stats = {k: price_stats(v) for k, v in market.items() if len(v) >= MIN_SIMILAR}
-    # Место машины среди объявлений goo-net своей группы (0 — самая дешёвая, 1 — самая дорогая) —
-    # на это же место встанет её цена среди продаж японских аукционов
+    # Цены похожих объявлений — для шкалы «дёшево — дорого» на сайте: от 10 объявлений — без крайних
+    # 10% с каждой стороны (битые, с ошибкой в цене). Место машины среди них (0 — самая дешёвая,
+    # 1 — самая дорогая) — на это же место встанет её цена среди продаж японских аукционов
+    levels = {}
     for c in touched + [c for cars in groups.values() for c in cars]:
-        prices = market.get(c.get("_market")) or []
-        if len(prices) >= MIN_SIMILAR and c.get("price_jpy"):
-            below = sum(1 for p in prices if p < c["price_jpy"])
-            same = sum(1 for p in prices if p == c["price_jpy"])
-            c["price_rank"] = (below + (same - 1) / 2) / (len(prices) - 1)
-    for c in touched + [c for cars in groups.values() for c in cars]:
-        if stats.get(c.get("_market")):
-            c["price_stats"] = stats[c["_market"]]
-    log(f"Статистика цен: {len(stats)} комплектаций (модель, год, объём, привод) с {MIN_SIMILAR}+ объявлениями "
-        f"из {len(market)}")
+        MARKET.attach(c, *c["_bm"], levels)
+    log("Статистика цен goo-net, насколько похожие объявления: " + ", ".join(f"{k} — {v}" for k, v in levels.items()))
     log(f"Обход: моделей с новыми машинами {len(groups)}, новых машин {sum(map(len, groups.values()))}, "
         f"машин с сайта встречено {len(touched)}, страниц {f.count}")
     return groups, touched
@@ -941,7 +1002,10 @@ def run_size(known: dict) -> int:
         BATCH, BATCH_PAUSE = UPDATE_BATCH, UPDATE_PAUSE
         log(f"Каталог заполнен ({good}) — обновление: до {UPDATE_NEW} новых, порции по {BATCH} с паузой {BATCH_PAUSE:g} мин")
         return UPDATE_NEW
-    log(f"Каталог заполнен ({good}), сейчас не время обновления — прогон окончен")
+    global REPAIR
+    REPAIR = True
+    log(f"Каталог заполнен ({good}), сейчас не время обновления — новых машин не добавляем, исправляем машины "
+        f"сайта: неполные и без шкалы цены")
     return 0
 
 
@@ -955,17 +1019,31 @@ def complete(listing: dict) -> bool:
                 and spec.get("Мощность, л.с.") and (spec.get("Объём, см³") or ev))
 
 
-def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
-    """Машины с сайта, не встреченные в обходе: давно не обновлявшиеся и неполные открываем
-    заново. Жива — отметка «ещё в продаже» (а неполную — дополняем); снята — не трогаем,
-    через 30 дней сайт её скроет. Ещё открываем машины без блока «Комплектация» (добавлены
-    до того, как парсер стал читать оборудование) — им отправляем оборудование."""
+def gauge_report(known: dict, when: str):
+    """В лог: сколько машин каталога со шкалой цены (у скольких — по аукционам)."""
+    pub = [i for i in known.values() if i.get("published") and i.get("complete")]
+    if pub and "has_gauge" in pub[0]:
+        log(f"Шкала цены {when}: у {sum(1 for i in pub if i.get('has_gauge'))} из {len(pub)} машин каталога, "
+            f"по аукционам drom.ru — у {sum(1 for i in pub if i.get('has_auction'))}")
+
+
+def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
+    """Машины с сайта, не встреченные в обходе: давно не обновлявшиеся, неполные и без шкалы цены
+    открываем заново. Жива — отметка «ещё в продаже» (а неполную — дополняем; без шкалы — цены похожих
+    объявлений и аукционов); снята — не трогаем, через 30 дней сайт её скроет. Ещё открываем машины без
+    блока «Комплектация» (добавлены до того, как парсер стал читать оборудование) — им отправляем
+    оборудование. В прогоне исправления (REPAIR) — и неполные, встреченные в обходе."""
     todo = [(k, i) for k, i in known.items() if i.get("url") and (
-        (k not in seen and (not i.get("complete") or (i.get("seen_days") or 0) >= 7))
+        (k not in seen and (not i.get("complete") or (i.get("seen_days") or 0) >= 7
+                            or (i.get("published") and i.get("has_gauge") is False)))
+        or (REPAIR and not i.get("complete"))
         or (i.get("complete") and i.get("published") and i.get("has_options") is False))]
-    todo.sort(key=lambda x: (x[1].get("complete", False), -(x[1].get("seen_days") or 0)))
-    out, alive = [], 0
-    for key, info in todo[:VERIFY_LIMIT]:
+    # Сначала неполные, потом без шкалы, потом давно не встречавшиеся
+    todo.sort(key=lambda x: (x[1].get("complete", False), x[1].get("has_gauge") is not False,
+                             -(x[1].get("seen_days") or 0)))
+    limit = REPAIR_VERIFY if REPAIR else VERIFY_LIMIT
+    cars, alive = [], 0
+    for key, info in todo[:limit]:
         if time.time() - STARTED > (RUN_MINUTES + 20) * 60:
             break         # не упереться в лимит GitHub — остальные проверим в следующий прогон
         html = f.get(info["url"])
@@ -974,16 +1052,31 @@ def verify(f: Fetcher, known: dict, seen: set) -> list[dict]:
             continue
         alive += 1
         car = {"id": key, "url": info["url"], "make": info.get("make"), "model": info.get("model"),
-               "year": d.get("year") or info.get("year"), "detail": d}
+               "year": d.get("year") or info.get("year"), "detail": d, "_info": info,
+               "price_jpy": d["price_jpy"], "cc": d.get("cc") or (int(info["cc"]) if str(info.get("cc") or "").isdigit() else None),
+               "awd": bool(re.search(r"4WD|AWD|полн", str(d.get("drive") or ""), re.I))}
+        bm = NAME_TO_BM.get((car["make"], car["model"]))
+        if bm:
+            car["_bm"] = bm
+            MARKET.attach(car, *bm)
+        cars.append(car)
+    # Аукционная цена — всем проверенным (они на сайте: соседние годы тоже)
+    attach_auctions([c for c in cars if c.get("_bm")], drom, {c["id"] for c in cars})
+    out = []
+    for car in cars:
+        info, d = car["_info"], car["detail"]
+        gauge = {**({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
+                 **({"auction": car["auction"]} if car.get("auction") else {})}
         if info.get("complete"):
-            out.append({"external_id": key, "source_url": info["url"], "price_value": d["price_jpy"],
-                        "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {})})
+            out.append({"external_id": car["id"], "source_url": info["url"], "price_value": d["price_jpy"],
+                        "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {}),
+                        **gauge})
         elif car["make"] and car["model"]:
             listing = to_listing(car, f)
             if complete(listing):
                 out.append(listing)
-    log(f"Проверено машин с сайта, не встреченных в обходе: {min(len(todo), VERIFY_LIMIT)} из {len(todo)}, "
-        f"в продаже {alive}")
+    log(f"Проверено машин с сайта: {min(len(todo), limit)} из {len(todo)}, в продаже {alive}, "
+        f"со шкалой цены {sum(1 for c in cars if c.get('price_stats') or c.get('auction'))}")
     return out
 
 
@@ -1057,8 +1150,12 @@ def main():
     f = Fetcher()
     known = fetch_known()
     total = run_size(known)
-    if not total:
+    if not total and not REPAIR:
         return
+    if REPAIR:
+        global AUCTION_PAGES, DROM_PAGES
+        AUCTION_PAGES, DROM_PAGES = REPAIR_DROM_PAGES - 50, REPAIR_DROM_PAGES
+    gauge_report(known, "до прогона")
     groups, touched = scan(f, known)
     f.human = True
     seen = {c["id"] for c in touched} | {c["id"] for cars in groups.values() for c in cars}
@@ -1197,10 +1294,13 @@ def main():
         if len(buf) >= BATCH:
             flush()
 
-    cars = pick(groups, total, resolve, on_site, on_take, have, known)
+    cars = pick(groups, total, resolve, on_site, on_take, have, known) if total else []
     log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
                                                                          sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
+    # Проверка машин с сайта — после новых: во время заполнения важнее новые машины. До закрытия
+    # drom.ru: проверенным машинам — ещё и аукционная цена
+    push(verify(f, known, seen, drom))
     close_drom()
     if drom:
         log(f"drom.ru: мощность для {drom_stats['power']} машин без неё в объявлении, технические характеристики "
@@ -1208,10 +1308,9 @@ def main():
         if drom.missing:
             top = sorted(drom.missing.items(), key=lambda x: -x[1])[:25]
             log("drom.ru: не найдены модели — " + ", ".join(f"{k} ({v})" for k, v in top))
-    # Проверка машин с сайта — после новых: во время заполнения важнее новые машины
-    push(verify(f, known, seen))
     sent, rejected = stats["sent"], stats["rejected"]
     log(f"Готово: отправлено {sent}, отсеяно без фото/цены/мощности {rejected}, запросов к goo-net {f.count}")
+    gauge_report(fetch_known(), "после прогона")
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1, default=str)
 
