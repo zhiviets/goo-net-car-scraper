@@ -17,7 +17,9 @@ for source in ("goonet", "encar", "che168"):
     pub = [i for i in items if i.get("published")]
     print(f"{source}: всего {len(items)}, опубликовано {len(pub)}, полных опубликованных "
           f"{sum(1 for i in pub if i.get('complete'))}, с комплектацией {sum(1 for i in items if i.get('has_options'))}, "
-          f"обновлены сегодня {sum(1 for i in items if (i.get('seen_days') or 0) == 0)}")
+          f"обновлены сегодня {sum(1 for i in items if (i.get('seen_days') or 0) == 0)}, "
+          f"со шкалой цены {sum(1 for i in pub if i.get('has_gauge'))}, с аукционной ценой {sum(1 for i in pub if i.get('has_auction'))}, "
+          f"скрыты без аукционной цены {sum(1 for i in pub if i.get('no_auction'))}")
 
     ok = [i for i in pub if i.get("complete")]
     bands = [("2022–2024", 2022, 2024), ("2025–2026", 2025, 2026), ("2017–2021", 2017, 2021), ("2010–2016", 2010, 2016)]
