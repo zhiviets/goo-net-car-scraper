@@ -23,6 +23,7 @@ import random
 import re
 import time
 import unicodedata
+from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
@@ -809,10 +810,22 @@ def auction_price(car: dict, lots: list[dict]) -> dict | None:
     → {price, n, lo, mid, hi} или None (продаж меньше MIN_SIMILAR)."""
     cc = car.get("cc")
     scored = [x for x in lots if x.get("price_jpy") and _SCORE.match(str(x.get("score") or ""))]
-    fit = [x for x in scored if not cc or not x.get("cc") or abs(x["cc"] - cc) <= 100]
-    same_drive = [x for x in fit if ("4WD" in (x.get("grade") or "").upper()) == bool(car.get("awd"))]
-    # Похожих продаж мало — шире: любой привод, потом любой объём (шкала нужна каждой машине)
-    pick = next((p for p in (same_drive, fit, scored) if len(p) >= MIN_SIMILAR), None)
+
+    def similar(pool):
+        fit = [x for x in pool if not cc or not x.get("cc") or abs(x["cc"] - cc) <= 100]
+        same_drive = [x for x in fit if ("4WD" in (x.get("grade") or "").upper()) == bool(car.get("awd"))]
+        # Похожих продаж мало — шире: любой привод, потом любой объём (шкала нужна каждой машине)
+        return next((p for p in (same_drive, fit, pool) if len(p) >= MIN_SIMILAR), None)
+
+    # Свежие продажи: за 3 месяца; мало — за 6; у редких моделей — все доступные (машина остаётся в каталоге)
+    pick, months = None, None
+    for m, days in ((3, 92), (6, 183)):
+        since = (date.today() - timedelta(days=days)).isoformat()
+        pick = similar([x for x in scored if (x.get("date") or "") >= since])
+        if pick:
+            months = m
+            break
+    pick = pick or similar(scored)
     if not pick:
         return None
     stats = price_stats([x["price_jpy"] for x in pick])
@@ -822,7 +835,7 @@ def auction_price(car: dict, lots: list[dict]) -> dict | None:
     # машина из середины получала не среднюю цену, если продажи сбиты к одному краю)
     lo, mid, hi = stats["lo"], stats["mid"], stats["hi"]
     price = lo + (mid - lo) * rank * 2 if rank <= 0.5 else mid + (hi - mid) * (rank - 0.5) * 2
-    return {**stats, "price": min(hi, max(lo, round(price / 1000) * 1000))}
+    return {**stats, "price": min(hi, max(lo, round(price / 1000) * 1000)), **({"months": months} if months else {})}
 
 
 def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:

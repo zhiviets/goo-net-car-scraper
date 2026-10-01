@@ -436,6 +436,7 @@ class DromCatalog:
             lots += new
             if len(new) < 10:
                 break
+        _lot_dates(lots, date.today())
         self.cache["auctions"][key] = {"day": today, "lots": [{k: v for k, v in x.items() if k != "lot"} for x in lots]}
         return self.cache["auctions"][key]["lots"]
 
@@ -673,6 +674,32 @@ class DromCatalog:
 AUCTION_TTL_DAYS = 7
 _AUC_HEAD = re.compile(r"^(.+),\s*((?:19|20)\d{2})$")
 _AUC_PRICE = re.compile(r"^([\d\s\u00a0\u202f]+)\s*JP¥$")
+# Дата продажи лота: «30 сентября» — без года (год восстанавливает auction_lots: лоты идут от новых к старым)
+_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
+           "ноября", "декабря"]
+_AUC_DATE = re.compile(r"^(\d{1,2})\s+(" + "|".join(_MONTHS) + r")(?:\s+((?:19|20)\d{2}))?$")
+
+
+def _lot_dates(lots: list[dict], today: date) -> None:
+    """Лотам с «dm» (день, месяц[, год]) — дата ISO: лоты от новых к старым, поэтому дата позже
+    предыдущей значит прошлый год."""
+    prev = today
+    for x in lots:
+        dm = x.pop("dm", None)
+        if not dm:
+            continue
+        day, month, year = dm
+        for y in ([year] if year else [prev.year, prev.year - 1]):
+            try:
+                d = date(y, month, day)
+            except ValueError:
+                continue
+            if year or d <= prev:
+                break
+        else:
+            continue
+        x["date"] = d.isoformat()
+        prev = d
 
 
 def _num_text(text: str) -> int | None:
@@ -685,8 +712,13 @@ def parse_auction(page_text: str) -> list[dict]:
     комплектация, «Объем 1 500 см³», «КПП …», «Кузов GP5», «Пробег 131 000 км», «Оценка 3.5»,
     «732 000 JP¥», …, «Лот 60155»."""
     lines = [ln.strip() for ln in page_text.split("\n") if ln.strip()]
-    lots, cur = [], None
+    lots, cur, last = [], None, None
     for i, ln in enumerate(lines):
+        m = _AUC_DATE.match(ln)
+        if m and last is not None and "dm" not in last:
+            # Дата продажи — после «Лот …» и названия аукциона
+            last["dm"] = (int(m.group(1)), _MONTHS.index(m.group(2)) + 1, int(m.group(3)) if m.group(3) else None)
+            continue
         head = _AUC_HEAD.match(ln)
         if head and i + 1 < len(lines) and not lines[i + 1].startswith(("Объем", "Пробег")):
             cur = {"year": int(head.group(2)), "grade": lines[i + 1]}
@@ -710,7 +742,7 @@ def parse_auction(page_text: str) -> list[dict]:
         elif ln.startswith("Лот ") and cur.get("price_jpy"):
             cur["lot"] = ln[4:].strip() + "|" + str(cur.get("price_jpy"))
             lots.append(cur)
-            cur = None
+            last, cur = cur, None
     return lots
 
 
