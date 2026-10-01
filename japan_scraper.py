@@ -935,7 +935,8 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             NAME_TO_BM[(MAKES[b], model_name(m))] = (b, m)
             MARKET.add(b, m, c)
             info = known.get(c["id"])
-            if info and info.get("complete"):
+            # С сайта: полная — отметка «ещё в продаже»; всё есть, кроме аукционной цены, — её дослать
+            if info and (info.get("complete") or info.get("no_auction")):
                 touched.append(c)
                 continue
             if info and info.get("year"):
@@ -1021,10 +1022,10 @@ def complete(listing: dict) -> bool:
 
 def gauge_report(known: dict, when: str):
     """В лог: сколько машин каталога со шкалой цены (у скольких — по аукционам)."""
-    pub = [i for i in known.values() if i.get("published") and i.get("complete")]
-    if pub and "has_gauge" in pub[0]:
-        log(f"Шкала цены {when}: у {sum(1 for i in pub if i.get('has_gauge'))} из {len(pub)} машин каталога, "
-            f"по аукционам drom.ru — у {sum(1 for i in pub if i.get('has_auction'))}")
+    pub = [i for i in known.values() if i.get("published") and (i.get("complete") or i.get("no_auction"))]
+    if pub and "has_auction" in pub[0]:
+        log(f"Аукционная цена и шкала {when}: у {sum(1 for i in pub if i.get('has_auction'))} из {len(pub)} машин "
+            f"(без неё каталог машину не показывает)")
 
 
 def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
@@ -1035,11 +1036,11 @@ def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
     оборудование. В прогоне исправления (REPAIR) — и неполные, встреченные в обходе."""
     todo = [(k, i) for k, i in known.items() if i.get("url") and (
         (k not in seen and (not i.get("complete") or (i.get("seen_days") or 0) >= 7
-                            or (i.get("published") and i.get("has_gauge") is False)))
-        or (REPAIR and not i.get("complete"))
+                            or (i.get("published") and (i.get("has_gauge") is False or i.get("no_auction")))))
+        or (REPAIR and not i.get("complete") and not i.get("no_auction"))
         or (i.get("complete") and i.get("published") and i.get("has_options") is False))]
-    # Сначала неполные, потом без шкалы, потом давно не встречавшиеся
-    todo.sort(key=lambda x: (x[1].get("complete", False), x[1].get("has_gauge") is not False,
+    # Сначала неполные, потом без аукционной цены, потом давно не встречавшиеся
+    todo.sort(key=lambda x: (x[1].get("complete", False) or bool(x[1].get("no_auction")), x[1].get("has_auction") is not False,
                              -(x[1].get("seen_days") or 0)))
     limit = REPAIR_VERIFY if REPAIR else VERIFY_LIMIT
     cars, alive = [], 0
@@ -1067,7 +1068,7 @@ def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
         info, d = car["_info"], car["detail"]
         gauge = {**({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
                  **({"auction": car["auction"]} if car.get("auction") else {})}
-        if info.get("complete"):
+        if info.get("complete") or info.get("no_auction"):
             out.append({"external_id": car["id"], "source_url": info["url"], "price_value": d["price_jpy"],
                         "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {}),
                         **gauge})
@@ -1162,6 +1163,12 @@ def main():
     drom, close_drom = open_drom()
     # Цена «как на аукционе» — машинам с сайта и новым (статистика продаж японских аукционов drom.ru)
     attach_auctions(touched + [c for cars in groups.values() for c in cars], drom, {c["id"] for c in touched})
+    # Торгуем с аукционов: новые машины — только те, у кого есть цена по продажам японских аукционов
+    # (без неё сайт машину не показывает — цена объявления goo-net выше аукционной)
+    before = sum(map(len, groups.values()))
+    groups = {k: [c for c in cars if c.get("auction")] for k, cars in groups.items()}
+    groups = {k: cars for k, cars in groups.items() if cars}
+    log(f"Новые машины с аукционной ценой: {sum(map(len, groups.values()))} из {before}")
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе (гибридам и электромобилям без
     # 30-минутной мощности — ещё и характеристики комплектации drom.ru с ней)
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
