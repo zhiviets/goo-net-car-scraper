@@ -81,7 +81,7 @@ PHOTO_MAX_WIDTH = 960
 PHOTO_QUALITY = 72
 # Каталог drom.ru (рынок «Япония»): технические характеристики комплектации и мощность, если её нет в
 # объявлении. Страниц drom.ru за прогон — не больше; кэш — drom_cache.json (сохраняется между прогонами)
-DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "300")
+DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "450")
 DROM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drom_cache.json")
 YEAR_BANDS = [("2022–2024", 2022, 2024, 0.60), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.15),
               ("2010–2016", 2010, 2016, 0.10)]
@@ -761,7 +761,7 @@ def price_stats(prices: list) -> dict:
     return {"n": len(p), "lo": at(0.1) if wide else p[0], "mid": at(0.5), "hi": at(0.9) if wide else p[-1]}
 
 
-AUCTION_PAGES = int(os.environ.get("GOONET_AUCTION_PAGES") or "250")
+AUCTION_PAGES = int(os.environ.get("GOONET_AUCTION_PAGES") or "350")
 # Аукционная оценка: цифровая (3, 3.5, 4.5…), S — новая машина, R и RA — после ремонта (их тоже учитываем)
 _SCORE = re.compile(r"^(?:\d(?:\.\d)?|S|R|RA)$", re.I)
 
