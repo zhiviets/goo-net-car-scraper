@@ -83,8 +83,15 @@ PHOTO_QUALITY = 72
 # объявлении. Страниц drom.ru за прогон — не больше; кэш — drom_cache.json (сохраняется между прогонами)
 DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "450")
 DROM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drom_cache.json")
-YEAR_BANDS = [("2022–2024", 2022, 2024, 0.60), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.15),
-              ("2010–2016", 2010, 2016, 0.10)]
+# Доли по годам: 40% — 2022–2024, 15% — 2025–2026, 25% — 2017–2021, 20% — 2010–2016 (массовые модели
+# прошлых лет — Tanto L375S 2013 и т. п. — тоже нужны каталогу)
+YEAR_BANDS = [("2022–2024", 2022, 2024, 0.40), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.25),
+              ("2010–2016", 2010, 2016, 0.20)]
+# Разнообразие каталога: лимиты [на модель-год, на модель] — с сайта (/known); сколько объявлений модели
+# встретилось в обходе (массовость) — сначала самые массовые
+MIX = {"limits": None}
+MODEL_CARDS = {}
+STATS_DAYS = int(os.environ.get("GOONET_STATS_DAYS") or "10")
 
 # Марки goo-net → как их пишем на сайте. Грузовики и спецтехнику не берём.
 MAKES = {
@@ -509,9 +516,23 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
     ходу отбора, а не после него: отбор открывает объявления и идёт часами). Когда выходит
     время прогона (RUN_MINUTES), новые объявления не открываются — отбор заканчивается."""
     on_site = on_site or {}
-    order = sorted(groups, key=lambda k: (on_site.get(k, 0), random.random()))
+    # Сначала модели, которых на сайте меньше, среди них — самые массовые на goo-net
+    order = sorted(groups, key=lambda k: (on_site.get(k, 0), -MODEL_CARDS.get(k, 0), random.random()))
     groups = {k: groups[k] for k in order}
     picked, used, count, per_group, taken = [], set(), {}, {}, {}
+    # Лимиты разнообразия — вместе с машинами сайта: не больше N машин модели-года и M машин модели
+    limits = MIX["limits"] or [10 ** 6, 10 ** 6]
+    mix_year, mix_model = {}, {}
+    for info in (known or {}).values():
+        if info.get("complete") and info.get("published") and str(info.get("year") or "").isdigit():
+            k = (info.get("make"), info.get("model"))
+            mix_year[(*k, int(info["year"]))] = mix_year.get((*k, int(info["year"])), 0) + 1
+            mix_model[k] = mix_model.get(k, 0) + 1
+    site_name = lambda key: (MAKES.get(key[0]), model_name(key[1]))
+
+    def mix_allows(car, key):
+        return (mix_year.get((*site_name(key), car.get("year")), 0) < limits[0]
+                and mix_model.get(site_name(key), 0) < limits[1])
     rank = {name: i for i, (name, *_) in enumerate(YEAR_BANDS)}
     want = run_wants(total, have or {})
     log("Нужно за прогон: " + ", ".join(f"{'до 160' if k == 'le160' else 'мощнее'} {b} — {v}"
@@ -571,6 +592,8 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
         return sum(v for (k, _), v in want.items() if k == kind)
 
     def take(car, key):
+        mix_year[(*site_name(key), car.get("year"))] = mix_year.get((*site_name(key), car.get("year")), 0) + 1
+        mix_model[site_name(key)] = mix_model.get(site_name(key), 0) + 1
         taken[(key, car["power"])] = taken.get((key, car["power"]), 0) + 1
         picked.append(car)
         used.add(car["id"])
@@ -580,7 +603,18 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             on_take(car)
 
     for key, cars in groups.items():
-        cars.sort(key=lambda c: rank.get(year_band(c["year"]), 9))
+        # Сначала годы модели, которых на сайте нет (или меньше), среди них — массовые, потом по долям лет;
+        # годы по очереди — по машине каждого года, потом по второй
+        per_year = {}
+        for c in cars:
+            per_year[c["year"]] = per_year.get(c["year"], 0) + 1
+        cars.sort(key=lambda c: (mix_year.get((*site_name(key), c["year"]), 0), -per_year.get(c["year"], 0),
+                                 rank.get(year_band(c["year"]), 9)))
+        nth, seq = {}, []
+        for c in cars:
+            nth[c["year"]] = nth.get(c["year"], 0) + 1
+            seq.append((nth[c["year"]], len(seq), c))
+        cars[:] = [c for *_, c in sorted(seq, key=lambda x: (x[0], x[1]))]
     for key, cars in groups.items():
         # По машине — только моделям, которых на сайте ещё нет, и в пределах долей; сначала
         # класс, который набран меньше
@@ -588,7 +622,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             continue
         for kind in sorted(KINDS, key=lambda k: total_of(k) / max(kind_want(k), 1)):
             # и годы — из клетки, набранной меньше всего
-            fits = sorted((c for c in cars if room(c, kind)),
+            fits = sorted((c for c in cars if room(c, kind) and mix_allows(c, key)),
                           key=lambda c: count.get((kind, year_band(c["year"])), 0) / want[(kind, year_band(c["year"]))])
             # Только машины, класс которых виден по карточке: сомнительные (2–3 л, редкие модели)
             # открываются впустую чаще всего — их черёд в доборе, когда верные кончатся
@@ -612,7 +646,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
                 while i < len(cars):
                     c = cars[i]
                     i += 1
-                    if c["id"] in used or (band and year_band(c["year"]) != band):
+                    if c["id"] in used or (band and year_band(c["year"]) != band) or not mix_allows(c, key):
                         continue
                     # год мог уточниться на странице объявления
                     if is_kind(c, key, kind, sure_only) and (not band or year_band(c["year"]) == band):
@@ -661,7 +695,9 @@ def fetch_known() -> dict:
         resp = httpx.get(f"{BN_AUTO_URL}/api/live-listings/known", params={"source": "goonet", "all": "1"},
                          headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=60)
         resp.raise_for_status()
-        items = {str(i["id"]): i for i in resp.json().get("items") or []}
+        data = resp.json()
+        MIX["limits"] = data.get("mix")
+        items = {str(i["id"]): i for i in data.get("items") or []}
         good = sum(1 for i in items.values() if i.get("complete"))
         log(f"На сайте: {len(items)}, из них с полной информацией {good}, "
             f"в каталоге {sum(1 for i in items.values() if i.get('published'))}")
@@ -704,7 +740,7 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
         "price_value": d.get("price_jpy"), "photo_url": photo,
         **({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
-        **({"auction": car["auction"]} if car.get("auction") else {}),
+        **({"auction": car["auction"], "stats_key": car.get("stats_key")} if car.get("auction") else {}),
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
         **({"options": d["options"]} if d.get("options") else {}),
         **({"tech": d["tech"]} if d.get("tech") else {}),
@@ -814,6 +850,7 @@ def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
             a = auction_price(c, lots)
             if a:
                 c["auction"] = a
+                c["stats_key"] = f"{MAKES[bm[0]]}|{model_name(bm[1])}|{year}"
                 done += 1
                 site_done += c["id"] in on_site
     # Машинам с сайта, которым продаж своего года не хватило, — продажи соседних годов (год ±1)
@@ -833,6 +870,7 @@ def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
             a = auction_price(c, lots)
             if a:
                 c["auction"] = a
+                c["stats_key"] = f"{MAKES[bm[0]]}|{model_name(bm[1])}|{year}"
                 done += 1
                 site_done += 1
                 near += 1
@@ -932,6 +970,7 @@ def scan(f: Fetcher, known: dict) -> tuple[dict, list]:
             if c.get("year") and 2022 <= c["year"] <= 2024 and guess_class(c) != "gt160":
                 recent[(b, m)] = recent.get((b, m), 0) + 1
             c["_bm"] = (b, m)
+            MODEL_CARDS[(b, m)] = MODEL_CARDS.get((b, m), 0) + 1
             NAME_TO_BM[(MAKES[b], model_name(m))] = (b, m)
             MARKET.add(b, m, c)
             info = known.get(c["id"])
@@ -1020,6 +1059,32 @@ def complete(listing: dict) -> bool:
                 and spec.get("Мощность, л.с.") and (spec.get("Объём, см³") or ev))
 
 
+def stale_auctions(known: dict, seen: set, drom) -> list[dict]:
+    """Машины сайта, не встреченные в обходе, без аукционной цены или с ценой старше STATS_DAYS дней — свежая
+    аукционная цена по продажам drom.ru. Место среди похожих — по цене объявления goo-net с сайта."""
+    cars = []
+    for vid, i in known.items():
+        if vid in seen or not i.get("published") or not i.get("url") or i.get("blocked"):
+            continue
+        if not (i.get("complete") or i.get("no_auction")):
+            continue
+        if i.get("has_auction") and i.get("stats_days") is not None and i["stats_days"] < STATS_DAYS:
+            continue
+        bm = NAME_TO_BM.get((i.get("make"), i.get("model")))
+        if not bm or not str(i.get("year") or "").isdigit():
+            continue
+        car = {"id": vid, "url": i["url"], "year": int(i["year"]), "_bm": bm, "price_jpy": i.get("price"),
+               "cc": int(i["cc"]) if str(i.get("cc") or "").isdigit() else None,
+               "awd": bool(re.search(r"4WD|AWD|полн", i.get("text") or "", re.I))}
+        MARKET.attach(car, *bm)
+        cars.append(car)
+    attach_auctions(cars, drom, {c["id"] for c in cars})
+    out = [{"external_id": c["id"], "source_url": c["url"], "auction": c["auction"], "stats_key": c.get("stats_key")}
+           for c in cars if c.get("auction")]
+    log(f"Аукционная шкала машинам сайта, не встреченным в обходе: обновлена у {len(out)} из {len(cars)}")
+    return out
+
+
 def gauge_report(known: dict, when: str):
     """В лог: сколько машин каталога со шкалой цены (у скольких — по аукционам)."""
     pub = [i for i in known.values() if i.get("published") and (i.get("complete") or i.get("no_auction"))]
@@ -1067,7 +1132,7 @@ def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
     for car in cars:
         info, d = car["_info"], car["detail"]
         gauge = {**({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
-                 **({"auction": car["auction"]} if car.get("auction") else {})}
+                 **({"auction": car["auction"], "stats_key": car.get("stats_key")} if car.get("auction") else {})}
         if info.get("complete") or info.get("no_auction"):
             out.append({"external_id": car["id"], "source_url": info["url"], "price_value": d["price_jpy"],
                         "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {}),
@@ -1173,8 +1238,11 @@ def main():
     # 30-минутной мощности — ещё и характеристики комплектации drom.ru с ней)
     push([{"external_id": c["id"], "source_url": c["url"], "mileage_km": c.get("mileage_km"),
            **({"price_stats": c["price_stats"]} if c.get("price_stats") else {}),
-           **({"auction": c["auction"]} if c.get("auction") else {}),
+           **({"auction": c["auction"], "stats_key": c.get("stats_key")} if c.get("auction") else {}),
            **tech_for_site_car(c, known, drom)} for c in touched])
+    # Аукционная шкала машинам сайта, не встреченным в обходе: нет её или старше STATS_DAYS дней —
+    # по продажам drom.ru (кэш на неделю), без запросов к goo-net
+    push(stale_auctions(known, seen, drom))
     log(f"Характеристики drom.ru с 30-минутной мощностью досланы машинам с сайта: {_tech_fixed[1]} "
         f"(искали у {_tech_fixed[0]})")
 
