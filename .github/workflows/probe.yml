@@ -9,6 +9,9 @@ on:
         description: "Какой скрипт проверки запустить"
         default: "probe.py"
 
+permissions:
+  contents: write
+
 jobs:
   probe:
     runs-on: ubuntu-latest
