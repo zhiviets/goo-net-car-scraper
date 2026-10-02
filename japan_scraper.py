@@ -44,7 +44,10 @@ FILL_TARGET = int(os.environ.get("GOONET_FILL_TARGET") or "5500")
 # Между обновлениями прогон не добавляет новых машин, а исправляет машины сайта: неполные (с ошибками)
 # и без шкалы цены — обход goo-net ради цен похожих объявлений, аукционы drom.ru, повторное открытие
 REPAIR = False
-GAUGE_FIRST = (os.environ.get("GOONET_GAUGE_FIRST") or "1") == "1"
+# Сначала аукционная цена всем машинам сайта, потом новые; GOONET_FILL=1 — прогон добора (цены машинам сайта
+# перестали находиться — добираем каталог новыми машинами, каждая с аукционной ценой)
+GAUGE_FIRST = (os.environ.get("GOONET_GAUGE_FIRST") or "1") == "1" and os.environ.get("GOONET_FILL") != "1"
+GAUGE_RUN = False   # этот прогон — поиск аукционной цены машинам сайта (новых не добавляем)
 GAUGE_FIRST_MAX = int(os.environ.get("GOONET_GAUGE_FIRST_MAX") or "50")
 REPAIR_VERIFY = int(os.environ.get("GOONET_REPAIR_VERIFY") or "800")
 REPAIR_DROM_PAGES = int(os.environ.get("GOONET_REPAIR_DROM_PAGES") or "650")
@@ -1042,15 +1045,16 @@ def run_size(known: dict) -> int:
     """Сколько новых машин добавить: вручную (GOONET_TOTAL); до заполнения каталога (FILL_TARGET) —
     по FILL_PER_RUN за прогон; потом в дни обновления (первый прогон дня) — UPDATE_NEW порциями
     по UPDATE_BATCH с паузой UPDATE_PAUSE; 0 — сегодня ничего не нужно."""
-    global BATCH, BATCH_PAUSE, REPAIR
+    global BATCH, BATCH_PAUSE, REPAIR, GAUGE_RUN
     if TOTAL:
         return TOTAL
-    good = sum(1 for i in known.values() if i.get("complete") and i.get("published"))
+    # До 5500 считаем машины с аукционной ценой: без неё машина на сайте не видна
+    good = sum(1 for i in known.values() if i.get("complete") and i.get("published") and not i.get("no_auction"))
     # Сначала цена продаж у каждой машины сайта: пока у GAUGE_FIRST_MAX+ машин её нет (скрыты без аукционной
     # цены) — новых не добавляем, весь прогон ищет им продажи
     lacking = sum(1 for i in known.values() if i.get("published") and i.get("no_auction"))
     if GAUGE_FIRST and lacking > GAUGE_FIRST_MAX:
-        REPAIR = True
+        REPAIR = GAUGE_RUN = True
         log(f"Без аукционной цены {lacking} машин сайта — новых не добавляем, ищем им продажи")
         return 0
     if good < FILL_TARGET:
@@ -1058,6 +1062,8 @@ def run_size(known: dict) -> int:
         log(f"Заполнение каталога: на сайте {good} из {FILL_TARGET} — добавим {n}")
         # Каталог ещё не заполнен — workflow сразу запустит следующий прогон (без остановки)
         open("continue_fill", "w").close()
+        if os.environ.get("GOONET_FILL") == "1":
+            open("fill_next", "w").close()   # цепочка добора дальше
         return n
     now = time.gmtime()
     if now.tm_wday in UPDATE_DAYS and now.tm_hour < 8:
@@ -1410,12 +1416,18 @@ def main():
     gauge_report(after, "после прогона")
     # Ищем продажи машинам сайта (новых не добавляем) — следующий прогон сразу, пока число машин без аукционной
     # цены заметно уменьшается; перестало — ждём расписания (кэш drom.ru обновится, появятся новые продажи)
-    if REPAIR and GAUGE_FIRST and after:
+    if GAUGE_RUN and after:
         lack = lambda k: sum(1 for i in k.values() if i.get("published") and i.get("no_auction"))
         was, now = lack(known), lack(after)
         log(f"Без аукционной цены: было {was}, стало {now}")
         if now > GAUGE_FIRST_MAX and was - now >= 20:
             open("continue_fill", "w").close()
+        elif now > GAUGE_FIRST_MAX:
+            # Продажи машинам сайта больше не находятся — дальше добор каталога до 5500 новыми машинами с
+            # аукционной ценой (оставшимся без неё цену ищут и прогоны добора, и прогоны по расписанию)
+            log("Аукционная цена больше не находится — следующий прогон добирает каталог новыми машинами с ценой")
+            open("continue_fill", "w").close()
+            open("fill_next", "w").close()
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1, default=str)
 
