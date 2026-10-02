@@ -694,6 +694,18 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
 
 # ---------- bn-auto ----------
 
+def prune_no_price() -> None:
+    """Удалить с сайта машины без аукционной цены — когда поиск цен им закончен и больше не находит."""
+    if not BN_AUTO_URL or not BN_AUTO_IMPORT_TOKEN:
+        return
+    try:
+        resp = httpx.post(f"{BN_AUTO_URL}/api/live-listings/prune-no-price", json={"source": "goonet"},
+                          headers={"Authorization": f"Bearer {BN_AUTO_IMPORT_TOKEN}"}, timeout=120)
+        log(f"Удаление машин без аукционной цены: {resp.status_code} {resp.text[:200]}")
+    except Exception as error:
+        log(f"Удаление машин без аукционной цены не удалось: {error}")
+
+
 def fetch_known() -> dict:
     if not BN_AUTO_URL or not BN_AUTO_IMPORT_TOKEN:
         return {}
@@ -1422,10 +1434,11 @@ def main():
         log(f"Без аукционной цены: было {was}, стало {now}")
         if now > GAUGE_FIRST_MAX and was - now >= 20:
             open("continue_fill", "w").close()
-        elif now > GAUGE_FIRST_MAX:
-            # Продажи машинам сайта больше не находятся — дальше добор каталога до 5500 новыми машинами с
-            # аукционной ценой (оставшимся без неё цену ищут и прогоны добора, и прогоны по расписанию)
-            log("Аукционная цена больше не находится — следующий прогон добирает каталог новыми машинами с ценой")
+        else:
+            # Продажи машинам сайта больше не находятся — машины без аукционной цены удаляем, дальше добор
+            # каталога до 5500 новыми машинами с аукционной ценой
+            log("Аукционная цена больше не находится — машины без неё удаляем, следующий прогон добирает каталог")
+            prune_no_price()
             open("continue_fill", "w").close()
             open("fill_next", "w").close()
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
