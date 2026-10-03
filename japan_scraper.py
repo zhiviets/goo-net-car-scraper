@@ -1267,6 +1267,13 @@ def main():
     drom, close_drom = open_drom()
     # Цена «как на аукционе» — машинам с сайта и новым (статистика продаж японских аукционов drom.ru)
     attach_auctions(touched + [c for cars in groups.values() for c in cars], drom, {c["id"] for c in touched})
+    # Обход удался: goo-net отдал машины сайта, а продажи drom.ru нашлись у большинства из них. Не удался
+    # (сайт или drom.ru не ответил) — машины без аукционной цены не удаляем: их цены не искали
+    pub = sum(1 for i in known.values() if i.get("published"))
+    priced = sum(1 for c in touched if c.get("auction"))
+    scan_ok = bool(drom) and len(touched) >= max(50, pub // 10) and priced >= len(touched) // 2
+    log(f"Обход: {'удался' if scan_ok else 'НЕ удался'} — машин сайта встречено {len(touched)} из {pub}, "
+        f"с аукционной ценой {priced}")
     # Торгуем с аукционов: новые машины — только те, у кого есть цена по продажам японских аукционов
     # (без неё сайт машину не показывает — цена объявления goo-net выше аукционной)
     before = sum(map(len, groups.values()))
@@ -1428,7 +1435,13 @@ def main():
     gauge_report(after, "после прогона")
     # Ищем продажи машинам сайта (новых не добавляем) — следующий прогон сразу, пока число машин без аукционной
     # цены заметно уменьшается; перестало — ждём расписания (кэш drom.ru обновится, появятся новые продажи)
-    if GAUGE_RUN and after:
+    if not scan_ok:
+        for name in ("continue_fill", "fill_next"):
+            if os.path.exists(name):
+                os.remove(name)
+        log("Обход не удался (goo-net или drom.ru не ответил) — машины без аукционной цены не удаляем, "
+            "следующий прогон — по расписанию")
+    if GAUGE_RUN and after and scan_ok:
         lack = lambda k: sum(1 for i in k.values() if i.get("published") and i.get("no_auction"))
         was, now = lack(known), lack(after)
         log(f"Без аукционной цены: было {was}, стало {now}")
