@@ -855,6 +855,13 @@ def auction_price(car: dict, lots: list[dict]) -> dict | None:
     return {**stats, "price": min(hi, max(lo, round(price / 1000) * 1000)), **({"months": months} if months else {})}
 
 
+def shown_auction(car: dict) -> bool:
+    """Аукционная цена, которую сайт покажет: есть и не меньше половины цены объявления goo-net (меньше —
+    сайт считает, что продажи не про эту машину, и прячет её: см. auctionFor в bn-auto)."""
+    a = car.get("auction")
+    return bool(a) and not (car.get("price_jpy") and a["price"] < car["price_jpy"] * 0.5)
+
+
 def attach_auctions(cars: list[dict], drom, on_site: set = frozenset()) -> None:
     """Машинам — цена «как на аукционе» по статистике японских аукционов drom.ru. Новых страниц drom.ru —
     не больше AUCTION_PAGES за прогон: сначала модели и годы машин, уже стоящих на сайте (on_site — их номера),
@@ -1277,7 +1284,8 @@ def main():
     # Торгуем с аукционов: новые машины — только те, у кого есть цена по продажам японских аукционов
     # (без неё сайт машину не показывает — цена объявления goo-net выше аукционной)
     before = sum(map(len, groups.values()))
-    groups = {k: [c for c in cars if c.get("auction")] for k, cars in groups.items()}
+    # …и такой, которую сайт покажет: меньше половины цены объявления сайт считает чужими продажами и прячет машину
+    groups = {k: [c for c in cars if shown_auction(c)] for k, cars in groups.items()}
     groups = {k: cars for k, cars in groups.items() if cars}
     log(f"Новые машины с аукционной ценой: {sum(map(len, groups.values()))} из {before}")
     # Отметка «ещё в продаже» машинам с сайта, встреченным в обходе (гибридам и электромобилям без
@@ -1454,6 +1462,11 @@ def main():
             prune_no_price()
             open("continue_fill", "w").close()
             open("fill_next", "w").close()
+    elif scan_ok and not GAUGE_RUN:
+        # Обход удался — машины, которые сайт прячет без аукционной цены (продаж не нашлось или цена продаж
+        # меньше половины цены объявления), удаляем: на сайте только машины с ценой продаж
+        log("Машины без аукционной цены (не нашлась или меньше половины цены объявления) удаляем")
+        prune_no_price()
     with open("goonet_batch.json", "w", encoding="utf-8") as out:
         json.dump([{k: v for k, v in c.items() if k != "detail"} for c in cars], out, ensure_ascii=False, indent=1, default=str)
 
