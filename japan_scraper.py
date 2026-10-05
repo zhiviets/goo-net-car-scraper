@@ -657,7 +657,7 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             continue
         for kind in sorted(KINDS, key=lambda k: total_of(k) / max(kind_want(k), 1)):
             # и годы — из клетки, набранной меньше всего
-            fits = sorted((c for c in cars if room(c, kind) and mix_allows(c, key)),
+            fits = sorted((c for c in cars if c["id"] not in used and room(c, kind) and mix_allows(c, key)),
                           key=lambda c: count.get((kind, year_band(c["year"])), 0) / want[(kind, year_band(c["year"]))])
             # Только машины, класс которых виден по карточке: сомнительные (2–3 л, редкие модели)
             # открываются впустую чаще всего — их черёд в доборе, когда верные кончатся
