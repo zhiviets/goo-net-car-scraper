@@ -81,10 +81,14 @@ BATCH_PAUSE = float(os.environ.get("GOONET_BATCH_PAUSE") or "1.5")
 MAX_MODELS = int(os.environ.get("GOONET_MAX_MODELS") or "0")
 # Сколько объявлений модели открывать, чтобы найти машину до 160 л.с.
 RESOLVE_PER_MODEL = 4
-# Фото: WebP до 960 px и до 150 КБ (храним в базе bn-auto, диск ограничен)
-MAX_PHOTO_BYTES = 150 * 1024
-PHOTO_MAX_WIDTH = 960
-PHOTO_QUALITY = 72
+# Фото — в хранилище bn-auto: WebP до 1200 px, качество 78, до 200 КБ (обычно 100–140 КБ) — чётко и не тяжело
+MAX_PHOTO_BYTES = 200 * 1024
+PHOTO_MAX_WIDTH = 1200
+PHOTO_QUALITY = 78
+# Галерея: сколько фото кроме главного; машинам, уже стоящим на сайте без галереи, — досылаем за прогон
+# не больше GALLERY_BACKFILL (их страницу goo-net открываем заново — по запросу на машину)
+GALLERY_MAX = 12
+GALLERY_BACKFILL = int(os.environ.get("GOONET_GALLERY_BACKFILL") or "150")
 # Каталог drom.ru (рынок «Япония»): технические характеристики комплектации и мощность, если её нет в
 # объявлении. Страниц drom.ru за прогон — не больше; кэш — drom_cache.json (сохраняется между прогонами)
 DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "450")
@@ -186,7 +190,7 @@ class Fetcher:
             img = Image.open(io.BytesIO(resp.content)).convert("RGB")
         except Exception:
             return None
-        # WebP: при том же качестве на ~40 % легче JPEG. 960 px по ширине хватает
+        # WebP: при том же качестве на ~40 % легче JPEG. 1200 px по ширине хватает
         # для страницы объявления; тяжёлые снимки сжимаем сильнее, затем уменьшаем.
         quality, max_width = PHOTO_QUALITY, PHOTO_MAX_WIDTH
         while True:
@@ -353,7 +357,7 @@ def parse_detail(html: str) -> dict:
         g = " ".join(w for w in g.split() if not re.search(r"[぀-ヿ一-鿿]", w))
         d["grade"] = g or None
     photos = re.findall(r'https?://picture1\.goo-net\.com/[^"\'\s]+/J/[^"\'\s]+\.jpg', html)
-    d["photos"] = list(dict.fromkeys(photos))[:3]
+    d["photos"] = list(dict.fromkeys(photos))[:GALLERY_MAX + 1]
     d["options"] = parse_equipment(all_lines)
     return d
 
@@ -725,6 +729,17 @@ def fetch_known() -> dict:
         return {}
 
 
+def gallery_photos(f: Fetcher, d: dict, skip: str | None = None) -> list[str]:
+    """Остальные фото со страницы машины (кроме главного) → data-URL по порядку, по 3 одновременно
+    (это сервер картинок goo-net, не страницы — блокировок не добавляет)."""
+    from concurrent.futures import ThreadPoolExecutor
+    urls = [u for u in d.get("photos") or [] if u != skip][:GALLERY_MAX]
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return [x for x in pool.map(f.photo, urls) if x]
+
+
 def to_listing(car: dict, f: Fetcher) -> dict:
     d = car.get("detail") or {}
     spec = {
@@ -745,18 +760,20 @@ def to_listing(car: dict, f: Fetcher) -> dict:
         "Мест": str(d["seats"]) if d.get("seats") else None,
         "Руль": "правый",
     }
-    photo = None
+    photo = main_url = None
     for url in d.get("photos") or []:
         photo = f.photo(url)
         if photo:
+            main_url = url
             break
     if not photo and car.get("image"):
         photo = f.photo(car["image"].replace("/Q/", "/J/")) or f.photo(car["image"])
+    gallery = gallery_photos(f, d, main_url) if photo else []
     return {
         "external_id": car["id"], "make": car["make"], "model": car["model"],
         "title": f"{car['make']} {car['model']}", "year": d.get("year") or car.get("year"),
         "mileage_km": d.get("mileage_km") or car.get("mileage_km"),
-        "price_value": d.get("price_jpy"), "photo_url": photo,
+        "price_value": d.get("price_jpy"), "photo_url": photo, **({"photos": gallery} if gallery else {}),
         **({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
         **({"auction": car["auction"], "stats_key": car.get("stats_key")} if car.get("auction") else {}),
         "spec": {k: v for k, v in spec.items() if v}, "source_url": car["url"],
@@ -791,9 +808,10 @@ def push(listings: list[dict]):
     if not BN_AUTO_URL or not BN_AUTO_IMPORT_TOKEN:
         log(f"BN_AUTO_URL / BN_AUTO_IMPORT_TOKEN не заданы — {len(listings)} машин не отправлены")
         return
-    light = [x for x in listings if "spec" not in x]
-    full = [x for x in listings if "spec" in x]
-    for batch in [light[i:i + 200] for i in range(0, len(light), 200)] + [full[i:i + 10] for i in range(0, len(full), 10)]:
+    # С фото (и галереей, ~2 МБ на машину) — по 5; только цена и отметка «ещё в продаже» — по 200
+    light = [x for x in listings if "spec" not in x and "photos" not in x]
+    heavy = [x for x in listings if "spec" in x or "photos" in x]
+    for batch in [light[i:i + 200] for i in range(0, len(light), 200)] + [heavy[i:i + 5] for i in range(0, len(heavy), 5)]:
         resp = post_batch(batch)
         try:
             data = resp.json()
@@ -1154,8 +1172,12 @@ def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
     todo.sort(key=lambda x: (x[1].get("complete", False) or bool(x[1].get("no_auction")), x[1].get("has_auction") is not False,
                              -(x[1].get("seen_days") or 0)))
     limit = REPAIR_VERIFY if REPAIR else VERIFY_LIMIT
+    # Машины сайта без галереи (добавлены до неё) — открываем заново, чтобы дослать фото
+    queued = {k for k, _ in todo[:limit]}
+    gallery_todo = [(k, i) for k, i in known.items() if i.get("url") and k not in queued and i.get("complete")
+                    and i.get("published") and i.get("gallery_n") == 0][:GALLERY_BACKFILL]
     cars, alive = [], 0
-    for key, info in todo[:limit]:
+    for key, info in todo[:limit] + gallery_todo:
         if time.time() - STARTED > (RUN_MINUTES + 20) * 60:
             break         # не упереться в лимит GitHub — остальные проверим в следующий прогон
         html = f.get(info["url"])
@@ -1180,13 +1202,16 @@ def verify(f: Fetcher, known: dict, seen: set, drom=None) -> list[dict]:
         gauge = {**({"price_stats": car["price_stats"]} if car.get("price_stats") else {}),
                  **({"auction": car["auction"], "stats_key": car.get("stats_key")} if car.get("auction") else {})}
         if info.get("complete") or info.get("no_auction"):
+            gallery = gallery_photos(f, d) if info.get("gallery_n") == 0 else []
             out.append({"external_id": car["id"], "source_url": info["url"], "price_value": d["price_jpy"],
                         "mileage_km": d.get("mileage_km"), **({"options": d["options"]} if d.get("options") else {}),
-                        **gauge})
+                        **({"photos": gallery} if gallery else {}), **gauge})
         elif car["make"] and car["model"]:
             listing = to_listing(car, f)
             if complete(listing):
                 out.append(listing)
+    log(f"Галерея: машин сайта без неё открыто заново {len(gallery_todo)}, дослано "
+        f"{sum(1 for x in out if 'photos' in x and 'spec' not in x)}")
     log(f"Проверено машин с сайта: {min(len(todo), limit)} из {len(todo)}, в продаже {alive}, "
         f"со шкалой цены {sum(1 for c in cars if c.get('price_stats') or c.get('auction'))}")
     return out
