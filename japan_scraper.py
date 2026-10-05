@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 from bs4 import BeautifulSoup
 
+import wanted as wanted_mod
+
 BASE = "https://www.goo-net.com"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
@@ -100,6 +102,8 @@ YEAR_BANDS = [("2022–2024", 2022, 2024, 0.40), ("2025–2026", 2025, 2026, 0.1
 # Разнообразие каталога: лимиты [на модель-год, на модель] — с сайта (/known); сколько объявлений модели
 # встретилось в обходе (массовость) — сначала самые массовые
 MIX = {"limits": None}
+# Доля прогона под модели из справочника сайта, которых на сайте мало (wanted.py)
+WANTED_SHARE = float(os.environ.get("GOONET_WANTED_SHARE") or "0.5")
 MODEL_CARDS = {}
 STATS_DAYS = int(os.environ.get("GOONET_STATS_DAYS") or "10")
 
@@ -514,7 +518,7 @@ def run_wants(total: int, have: dict) -> dict:
 
 
 def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take=None,
-         have: dict | None = None, known: dict | None = None) -> list[dict]:
+         have: dict | None = None, known: dict | None = None, wanted=None) -> list[dict]:
     """Как у Кореи: по машине на модель, затем добор по кругу по моделям. Доли — 75% до 160 л.с.
     и доли лет (YEAR_BANDS) — для каталога целиком (have, см. run_wants); клетки «класс × годы»
     набираются вперемешку, чтобы и оборванный по времени прогон держал доли.
@@ -625,6 +629,27 @@ def pick(groups: dict, total: int, resolve, on_site: dict | None = None, on_take
             nth[c["year"]] = nth.get(c["year"], 0) + 1
             seq.append((nth[c["year"]], len(seq), c))
         cars[:] = [c for *_, c in sorted(seq, key=lambda x: (x[0], x[1]))]
+    # Модели из справочника сайта, которых на сайте меньше 3 машин (wanted.py), — в первую очередь, до нужного
+    # числа (не больше WANTED_SHARE прогона); класс — по карточке или открытием объявления, как обычно
+    from_ref = 0
+    if wanted:
+        cap = max(1, int(total * WANTED_SHARE))
+        for key, cars in groups.items():
+            if from_ref >= cap or len(picked) >= total:
+                break
+            make, model = site_name(key)
+            for car in cars:
+                if wanted.need(make, model) <= 0 or from_ref >= cap or len(picked) >= total:
+                    break
+                if time.time() - STARTED > RUN_MINUTES * 60:
+                    break
+                if car["id"] in used or not mix_allows(car, key):
+                    continue
+                if power(car, key) in KINDS:
+                    take(car, key)
+                    wanted.took(make, model)
+                    from_ref += 1
+        log(f"Из справочника сайта (моделей мало на сайте): {from_ref}")
     for key, cars in groups.items():
         # По машине — только моделям, которых на сайте ещё нет, и в пределах долей; сначала
         # класс, который набран меньше
@@ -1448,7 +1473,8 @@ def main():
         if len(buf) >= BATCH:
             flush()
 
-    cars = pick(groups, total, resolve, on_site, on_take, have, known) if total else []
+    cars = pick(groups, total, resolve, on_site, on_take, have, known,
+                wanted=wanted_mod.load(BN_AUTO_URL, BN_AUTO_IMPORT_TOKEN, "goonet")) if total else []
     log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
                                                                          sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
