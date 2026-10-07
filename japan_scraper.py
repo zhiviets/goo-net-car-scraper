@@ -98,7 +98,7 @@ DROM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drom_cach
 # Класс мощности уже открытых при отборе объявлений: id → [класс или None, день]. Без него каждый прогон заново
 # открывал ~780 тех же объявлений (80+ минут) ради 8 новых машин. Кэш — между прогонами (actions/cache)
 POWER_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "power_cache.json")
-POWER_CACHE_DAYS = int(os.environ.get("GOONET_POWER_CACHE_DAYS") or "7")
+POWER_CACHE_DAYS = int(os.environ.get("GOONET_POWER_CACHE_DAYS") or "90")
 
 
 def load_power_cache() -> dict:
