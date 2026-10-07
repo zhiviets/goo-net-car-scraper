@@ -56,7 +56,9 @@ jobs:
       - name: Restore drom.ru cache
         uses: actions/cache@v4
         with:
-          path: drom_cache.json
+          path: |
+            drom_cache.json
+            power_cache.json
           key: drom-cache-${{ github.run_id }}
           restore-keys: drom-cache-
       - name: Scrape goo-net and push to bn-auto
