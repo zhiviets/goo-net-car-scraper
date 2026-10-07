@@ -95,6 +95,25 @@ GALLERY_BACKFILL = int(os.environ.get("GOONET_GALLERY_BACKFILL") or "150")
 # объявлении. Страниц drom.ru за прогон — не больше; кэш — drom_cache.json (сохраняется между прогонами)
 DROM_PAGES = int(os.environ.get("GOONET_DROM_PAGES") or "450")
 DROM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drom_cache.json")
+# Класс мощности уже открытых при отборе объявлений: id → [класс или None, день]. Без него каждый прогон заново
+# открывал ~780 тех же объявлений (80+ минут) ради 8 новых машин. Кэш — между прогонами (actions/cache)
+POWER_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "power_cache.json")
+POWER_CACHE_DAYS = int(os.environ.get("GOONET_POWER_CACHE_DAYS") or "7")
+
+
+def load_power_cache() -> dict:
+    try:
+        with open(POWER_CACHE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    today = date.today().toordinal()
+    return {k: v for k, v in data.items() if isinstance(v, list) and len(v) == 2 and today - v[1] <= POWER_CACHE_DAYS}
+
+
+def save_power_cache(cache: dict) -> None:
+    with open(POWER_CACHE, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh, ensure_ascii=False)
 # Доли по годам: 40% — 2022–2024, 15% — 2025–2026, 25% — 2017–2021, 20% — 2010–2016 (массовые модели
 # прошлых лет — Tanto L375S 2013 и т. п. — тоже нужны каталогу)
 YEAR_BANDS = [("2022–2024", 2022, 2024, 0.40), ("2025–2026", 2025, 2026, 0.15), ("2017–2021", 2017, 2021, 0.25),
@@ -1381,8 +1400,22 @@ def main():
                     f"«{query.get('trim')}» → {drom.last_candidates[:4] if getattr(drom, 'last_candidates', None) else 'нет групп'}")
         return d["_drom"]
 
-    def resolve(car):
-        """Страница объявления: мощность (最高出力), год, цена, характеристики."""
+    power_cache = load_power_cache()
+    log(f"Кэш класса мощности: {len(power_cache)} объявлений (не открываем повторно {POWER_CACHE_DAYS} дн.)")
+
+    def resolve(car, force=False):
+        """Страница объявления: мощность (最高出力), год, цена, характеристики. Класс уже известен из кэша — страницу
+        не открываем (force — страница нужна: машину берём и отправляем)."""
+        cached = power_cache.get(str(car["id"]))
+        if cached is not None and not force:
+            opened["из кэша"] = opened.get("из кэша", 0) + 1
+            return cached[0]
+        cls = resolve_open(car)
+        if "detail" in car:   # страница открылась (иначе — «не открылась», запоминать нечего)
+            power_cache[str(car["id"])] = [cls, date.today().toordinal()]
+        return cls
+
+    def resolve_open(car):
         html = f.get(car["url"])
         if not html:
             return note("страница не открылась")
@@ -1447,7 +1480,7 @@ def main():
         listings = []
         for car in buf:
             if "detail" not in car:
-                resolve(car)
+                resolve(car, force=True)
             # Технические характеристики комплектации с drom.ru (разгон, расход, размеры, масса…)
             found = drom_found(car) if drom else None
             tech = drom.tech(found.get("trim")) if found else None
@@ -1475,6 +1508,7 @@ def main():
 
     cars = pick(groups, total, resolve, on_site, on_take, have, known,
                 wanted=wanted_mod.load(BN_AUTO_URL, BN_AUTO_IMPORT_TOKEN, "goonet")) if total else []
+    save_power_cache(power_cache)
     log(f"Открыто объявлений при отборе {sum(opened.values())}: " + ", ".join(f"{k} — {v}" for k, v in
                                                                          sorted(opened.items(), key=lambda x: -x[1])))
     flush(last=True)
